@@ -455,8 +455,22 @@ async def load_channels(request: Request, name: str):
 
 @router.post("/settings/detect-ports", response_class=HTMLResponse)
 async def detect_meshcore_ports(request: Request):
-    devices = await find_meshcore_devices()
-    return render(request, "_meshcore_ports.html", devices=devices)
+    form = await request.form()
+    current_port = str(form.get("meshcore_port", "") or "").strip()
+    db = _db(request)
+    saved_port = db.get_setting("meshcore_port", "") or ""
+    saved_conn = db.get_setting("meshcore_conn", "serial") or "serial"
+    active_port = saved_port if saved_conn == "serial" and _status_flag(request, "meshcore") else ""
+    devices = await find_meshcore_devices(
+        active_port=active_port,
+        active_model=db.get_setting("meshcore_model", "") or "",
+    )
+    return render(
+        request,
+        "_meshcore_ports.html",
+        devices=devices,
+        current_port=current_port,
+    )
 
 
 @router.get("/meshcore/settings", response_class=HTMLResponse)

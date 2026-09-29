@@ -50,10 +50,10 @@
       {% include "_radio_channels.html" %}
     </div>
 
-    <label>USB serial port or network host</label>
+    <label>USB serial port (manual path)</label>
     <div class="row" style="align-items:end;">
-      <div><input id="meshcore_port" name="meshcore_port" value="{{ mc_port }}" placeholder="/dev/ttyUSB0 or 192.168.1.51:4000"></div>
-      <div><button type="button" class="secondary" hx-post="/settings/detect-ports" hx-target="#meshcore-ports" hx-swap="innerHTML">Auto-detect USB</button></div>
+      <div><input id="meshcore_port" name="meshcore_port" value="{{ mc_port }}" placeholder="/dev/serial/by-id/usb-..."></div>
+      <div><button type="button" class="secondary" hx-post="/settings/detect-ports" hx-target="#meshcore-ports" hx-swap="innerHTML" hx-include="#meshcore_port">Auto-detect USB</button></div>
     </div>
     <div id="meshcore-ports" style="margin-top:12px;"></div>
     <label style="margin-top:12px;">Network host (only for TCP)</label>

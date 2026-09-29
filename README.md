@@ -49,7 +49,7 @@ The application uses BOM's public state-based warning RSS feeds, including the w
 1. Open Settings.
 2. Select the BOM state or territory feeds to monitor.
 3. Optionally enter forecast district names.
-4. Configure MeshCore as USB serial or TCP and select the live/test channels. Auto-detect USB prefers a stable `/dev/serial/by-id/` path on Linux when available; click Save settings to persist the selected port.
+4. Configure MeshCore as USB serial or TCP and select the live/test channels. For USB, click Auto-detect USB and select a companion radio from the detected-device dropdown; Linux selections prefer a stable `/dev/serial/by-id/` path. A serial path can still be entered manually when detection is unavailable. Click Save settings to persist the selected port.
 5. Leave dry-run enabled while checking the dashboard and history.
 6. Send a manual test before enabling live broadcasts.
 

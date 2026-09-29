@@ -28,6 +28,12 @@ def _stable_port(device: str, by_id_dir: Path = Path("/dev/serial/by-id")) -> st
     return device
 
 
+def _same_port(first: str, second: str) -> bool:
+    if not first or not second:
+        return False
+    return Path(first).resolve() == Path(second).resolve()
+
+
 async def _probe_port(port_info, timeout: float) -> DetectedMeshCore | None:
     from meshcore import EventType, MeshCore
 
@@ -71,18 +77,45 @@ async def _probe_port(port_info, timeout: float) -> DetectedMeshCore | None:
     return None
 
 
-async def find_meshcore_devices(timeout: float = 5.0,
-                                probe_timeout: float = 1.5) -> list[DetectedMeshCore]:
+async def find_meshcore_devices(
+    timeout: float = 14.0,
+    probe_timeout: float = 6.0,
+    active_port: str = "",
+    active_model: str = "",
+    active_firmware: str = "",
+) -> list[DetectedMeshCore]:
     """Return serial ports that answer a MeshCore device-info query."""
     from serial.tools import list_ports
 
     ports = [port for port in list_ports.comports() if getattr(port, "device", "")]
     if not ports:
         return []
-    probes = [_probe_port(port, probe_timeout) for port in ports]
+
+    devices = []
+    ports_to_probe = []
+    for port in ports:
+        stable_port = _stable_port(port.device)
+        if _same_port(port.device, active_port) or _same_port(stable_port, active_port):
+            devices.append(DetectedMeshCore(
+                port=stable_port,
+                description=(getattr(port, "description", "") or "").strip(),
+                model=active_model.strip(),
+                firmware=active_firmware.strip(),
+                vid=getattr(port, "vid", None),
+                pid=getattr(port, "pid", None),
+            ))
+        else:
+            ports_to_probe.append(port)
+
+    probes = [_probe_port(port, probe_timeout) for port in ports_to_probe]
     try:
         results = await asyncio.wait_for(asyncio.gather(*probes), timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning("MeshCore port discovery timed out after %.1fs", timeout)
-        return []
-    return [result for result in results if result is not None]
+        results = []
+
+    devices.extend(result for result in results if result is not None)
+    unique = {}
+    for device in devices:
+        unique[str(Path(device.port).resolve())] = device
+    return sorted(unique.values(), key=lambda device: device.port)

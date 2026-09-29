@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.meshcore_discovery import DetectedMeshCore
 from app.web.routes import router
 
 
@@ -62,9 +63,59 @@ def test_settings_page_renders_load_button_and_numeric_fallback():
     assert "hx-post=\"/settings/channels/meshcore\"" in body
     assert "hx-target=\"#meshcore-channel-fields\"" in body
     assert "hx-include=\"[name='meshcore_conn'],[name='meshcore_port'],[name='meshcore_host']\"" in body
+    assert 'hx-include="#meshcore_port"' in body
+    assert 'name="meshcore_port"' in body
+    assert "USB serial port (manual path)" in body
     assert "<div id=\"meshcore-channel-fields\">" in body
     assert 'name="meshcore_channel" type="number" min="0" value="2"' in body
     assert 'name="meshcore_test_channel" type="number" min="0" value="5"' in body
+
+
+def test_detect_ports_renders_select_and_active_radio(monkeypatch):
+    path = "/dev/serial/by-id/usb-Seeed_Studio_XIAO_nRF52840_B89FC3F98AFD92B1-if00"
+    client, _, _ = _client(
+        {
+            "meshcore_conn": "serial",
+            "meshcore_port": path,
+            "meshcore_model": "Companion",
+        },
+        connected=True,
+    )
+    calls = []
+
+    async def fake_discovery(**kwargs):
+        calls.append(kwargs)
+        return [DetectedMeshCore(
+            port=path,
+            description="XIAO nRF52840",
+            model="Companion",
+            firmware="1.9.0",
+        )]
+
+    monkeypatch.setattr("app.web.routes.find_meshcore_devices", fake_discovery)
+    response = client.post("/settings/detect-ports", data={"meshcore_port": path})
+
+    assert response.status_code == 200
+    assert '<select id="meshcore_detected_port"' in response.text
+    assert f'value="{path}" selected' in response.text
+    assert "Companion (firmware 1.9.0)" in response.text
+    assert "XIAO nRF52840" in response.text
+    assert "document.getElementById('meshcore_port').value" in response.text
+    assert calls == [{"active_port": path, "active_model": "Companion"}]
+
+
+def test_detect_ports_renders_empty_state(monkeypatch):
+    client, _, _ = _client({"meshcore_conn": "serial", "meshcore_port": ""})
+
+    async def no_devices(**kwargs):
+        return []
+
+    monkeypatch.setattr("app.web.routes.find_meshcore_devices", no_devices)
+    response = client.post("/settings/detect-ports", data={"meshcore_port": ""})
+
+    assert response.status_code == 200
+    assert "No MeshCore devices responded" in response.text
+    assert "meshcore_detected_port" not in response.text
 
 
 def test_settings_page_renders_selects_when_channels_exist():

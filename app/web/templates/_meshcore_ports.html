@@ -1,14 +1,11 @@
 {% if devices %}
-<div class="panel" style="padding:10px;">
-  <strong>Detected MeshCore devices</strong>
+<label for="meshcore_detected_port">Detected MeshCore companion</label>
+<select id="meshcore_detected_port" onchange="if (this.value) document.getElementById('meshcore_port').value = this.value">
+  <option value="">Select a USB radio...</option>
   {% for device in devices %}
-  <div class="row" style="align-items:center; margin-top:8px;">
-    <div><code>{{ device.port }}</code><br><span class="hint">{{ device.description or 'USB serial device' }}</span></div>
-    <div>{{ device.model or 'MeshCore device' }}{% if device.firmware %}<br><span class="hint">Firmware {{ device.firmware }}</span>{% endif %}</div>
-    <div><button type="button" class="secondary" onclick="document.getElementById('meshcore_port').value={{ device.port|tojson }}">Use</button></div>
-  </div>
+  <option value="{{ device.port }}" {% if device.port == current_port %}selected{% endif %}>{{ device.model or 'MeshCore device' }}{% if device.firmware %} (firmware {{ device.firmware }}){% endif %} - {{ device.description or 'USB serial device' }} - {{ device.port }}</option>
   {% endfor %}
-</div>
+</select>
 {% else %}
 <p class="hint">No MeshCore devices responded on the available USB serial ports.</p>
 {% endif %}
