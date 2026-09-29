@@ -42,12 +42,12 @@ def decide(alert: Alert, rules: FilterRules, lookup: StateLookup) -> Decision:
     new_hash = alert.content_hash()
 
     if alert.message_type == "Cancel":
-        candidates = [lookup(alert.nws_id)] + [lookup(r) for r in alert.references]
+        candidates = [lookup(alert.alert_id)] + [lookup(r) for r in alert.references]
         if any(_is_sent(s) for s in candidates):
             return Decision("cancelled", True, "early cancellation")
         return Decision("filtered", False, "cancel of alert never sent")
 
-    prior = lookup(alert.nws_id)
+    prior = lookup(alert.alert_id)
     if _is_sent(prior):
         if prior["msg_hash"] == new_hash:
             return Decision("duplicate", False, "same alert id, unchanged")

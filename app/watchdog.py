@@ -3,7 +3,7 @@
 `restart: unless-stopped` (Docker) and `Restart=on-failure` (systemd) relaunch a
 process that CRASHES, but not one that is wedged-but-alive: a deadlock or a sync
 call blocking the asyncio event loop leaves the process "running" while it quietly
-stops polling NOAA and stops transmitting. This watchdog catches that.
+stops polling BOM and stops transmitting. This watchdog catches that.
 
 A plain OS thread (independent of the event loop, so it keeps running even when
 the loop is blocked) checks a heartbeat that an event-loop task refreshes. If the
@@ -17,7 +17,7 @@ import os
 import threading
 import time
 
-logger = logging.getLogger("mesh_wx.watchdog")
+logger = logging.getLogger("wx_echo.watchdog")
 
 
 class Liveness:

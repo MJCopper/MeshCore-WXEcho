@@ -1,15 +1,15 @@
 services:
-  mesh-wx:
+  wx-echo:
     build: .
-    container_name: mesh-wx
+    container_name: wx-echo
     restart: unless-stopped
     # Host 8110 (8000 is taken on VM103; sits next to paperless :8100).
-    # Container still listens on 8000 (MESH_WX_PORT below).
+    # Container still listens on 8000 (WX_ECHO_PORT below).
     ports:
       - "8110:8000"
     environment:
-      MESH_WX_PORT: "8000"
-      MESH_WX_DB: "/data/mesh-wx.db"
+      WX_ECHO_PORT: "8000"
+      WX_ECHO_DB: "/data/wx-echo.db"
     volumes:
       # SQLite lives here (settings, history, transmit log, dedupe state).
       - ./data:/data

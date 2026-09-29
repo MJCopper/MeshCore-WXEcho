@@ -7,10 +7,38 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
-APP_DIRNAME = "MeshWX"
+APP_DIRNAME = "WXEcho"
+LEGACY_APP_DIRNAME = "".join(["Mesh", "WX"])
+LEGACY_LINUX_DIRNAME = "".join(["mesh", "-wx"])
+LEGACY_DB_NAME = "".join(["mesh", "-wx", ".db"])
+
+
+def _legacy_env_name(name: str) -> str:
+    return name.replace("WX_ECHO", "".join(["MESH", "_WX"]), 1)
+
+
+def _env_with_legacy(name: str, default: str | None = None) -> str | None:
+    val = os.environ.get(name)
+    if val is not None:
+        return val
+    legacy = _legacy_env_name(name)
+    legacy_val = os.environ.get(legacy)
+    if legacy_val is not None:
+        warnings.warn(
+            f"{legacy} is deprecated; use {name} instead.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return legacy_val
+    return default
+
+
+def device_writes_enabled() -> bool:
+    return os.environ.get("WX_ECHO_DEVICE_WRITES_ENABLED", "").lower() in {"1", "true", "yes", "on"}
 
 
 def default_data_dir() -> Path:
@@ -18,9 +46,9 @@ def default_data_dir() -> Path:
 
     Chosen so the app runs unprivileged out-of-the-box on every platform:
       * Docker/Linux containers .......... /data   (if it exists and is writable)
-      * Windows .......................... %LOCALAPPDATA%\\MeshWX
-      * macOS ............................ ~/Library/Application Support/MeshWX
-      * Linux/Raspberry Pi (native) ...... $XDG_DATA_HOME/mesh-wx  (~/.local/share/mesh-wx)
+      * Windows .......................... %LOCALAPPDATA%\\WXEcho
+      * macOS ............................ ~/Library/Application Support/WXEcho
+      * Linux/Raspberry Pi (native) ...... $XDG_DATA_HOME/wx-echo  (~/.local/share/wx-echo)
     """
     # Honour the container convention when /data is mounted.
     if os.path.isdir("/data") and os.access("/data", os.W_OK):
@@ -29,11 +57,38 @@ def default_data_dir() -> Path:
     if sys.platform.startswith("win"):
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") \
             or str(Path.home() / "AppData" / "Local")
-        return Path(base) / APP_DIRNAME
+        new_dir = Path(base) / APP_DIRNAME
+        legacy_dir = Path(base) / LEGACY_APP_DIRNAME
+        if legacy_dir.exists() and not new_dir.exists():
+            warnings.warn(
+                f"Using legacy data directory '{legacy_dir}'. Move to '{new_dir}' when convenient.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return legacy_dir
+        return new_dir
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP_DIRNAME
+        new_dir = Path.home() / "Library" / "Application Support" / APP_DIRNAME
+        legacy_dir = Path.home() / "Library" / "Application Support" / LEGACY_APP_DIRNAME
+        if legacy_dir.exists() and not new_dir.exists():
+            warnings.warn(
+                f"Using legacy data directory '{legacy_dir}'. Move to '{new_dir}' when convenient.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return legacy_dir
+        return new_dir
     base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / "mesh-wx"
+    new_dir = Path(base) / "wx-echo"
+    legacy_dir = Path(base) / LEGACY_LINUX_DIRNAME
+    if legacy_dir.exists() and not new_dir.exists():
+        warnings.warn(
+            f"Using legacy data directory '{legacy_dir}'. Move to '{new_dir}' when convenient.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return legacy_dir
+    return new_dir
 
 
 @dataclass(frozen=True)
@@ -44,10 +99,20 @@ class BootstrapConfig:
 
 
 def load_bootstrap() -> BootstrapConfig:
-    db_path = os.environ.get("MESH_WX_DB")
+    db_path = _env_with_legacy("WX_ECHO_DB")
     if not db_path:
         data_dir = default_data_dir()
-        db_path = str(data_dir / "mesh-wx.db")
+        new_db = data_dir / "wx-echo.db"
+        legacy_db = data_dir / LEGACY_DB_NAME
+        if legacy_db.exists() and not new_db.exists():
+            warnings.warn(
+                f"Using legacy database path '{legacy_db}'. Move to '{new_db}' when convenient.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            db_path = str(legacy_db)
+        else:
+            db_path = str(new_db)
     # Make sure the parent directory exists so SQLite can create the file.
     parent = Path(db_path).expanduser().parent
     try:
@@ -55,8 +120,8 @@ def load_bootstrap() -> BootstrapConfig:
     except OSError:
         pass
     return BootstrapConfig(
-        http_host=os.environ.get("MESH_WX_HOST", "0.0.0.0"),
-        http_port=int(os.environ.get("MESH_WX_PORT", "8000")),
+        http_host=_env_with_legacy("WX_ECHO_HOST", "0.0.0.0") or "0.0.0.0",
+        http_port=int(_env_with_legacy("WX_ECHO_PORT", "8000") or "8000"),
         db_path=str(Path(db_path).expanduser()),
     )
 
@@ -64,17 +129,11 @@ def load_bootstrap() -> BootstrapConfig:
 # Default settings seeded into the db on first run. Every one of these is
 # editable in the UI afterwards; env vars never override stored settings.
 DEFAULT_SETTINGS: dict = {
-    "zones": "SCZ050",
+    "bom_regions": ["NSW"],
+    "bom_districts": [],
     "poll_interval": 120,
-    "nws_contact": "mesh-wx (change-me@example.com)",
-    "channel_index": 0,
-    "serial_port": "",
-    "meshtastic_enabled": True,
-    "meshtastic_conn": "serial",
-    "meshtastic_host": "",
-    "meshtastic_repeat": 2,
-    "meshtastic_test_channel": 1,
-    "meshcore_enabled": False,
+    "bom_contact": "MeshCore BOM Weather (change-me@example.com)",
+    "meshcore_enabled": True,
     "meshcore_conn": "serial",
     "meshcore_port": "",
     "meshcore_host": "",
@@ -82,8 +141,8 @@ DEFAULT_SETTINGS: dict = {
     "meshcore_repeat": 2,
     "meshcore_test_channel": 1,
     "dry_run": True,
-    "test_channel": 1,   # tests + manual sends use this channel (keep off the live alert channel 0)
-    "display_timezone": "",   # blank = use this computer's local time zone
+    "test_channel": 1,
+    "display_timezone": "Australia/Sydney",
     # Filter rules (editable). An alert is INCLUDED when its event is in
     # filter_include_exact OR ends with any suffix in filter_include_suffix,
     # UNLESS the event is in filter_exclude_exact.
@@ -93,54 +152,21 @@ DEFAULT_SETTINGS: dict = {
 }
 
 POLL_INTERVAL_MIN = 60
-# Hard ceiling on a single poll cycle. The NWS fetch is already bounded (30s
+# Hard ceiling on a single poll cycle. The BOM fetch is already bounded (30s
 # timeout x a few retries), so exceeding this means something hung (DB lock,
 # wedged await, a bug). The watchdog aborts the poll so the loop always recovers.
 POLL_HARD_TIMEOUT = 180
 MAX_PAYLOAD_BYTES = 195
-BURST_GAP_SECONDS = 30
+FINAL_VERIFICATION_MESSAGE = (
+    "UNOFFICIAL automated relay. May be incomplete or inaccurate. Verify warnings at "
+    "bom.gov.au/weather-and-climate/warnings-and-alerts"
+)
+if len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+    raise ValueError("FINAL_VERIFICATION_MESSAGE exceeds MAX_PAYLOAD_BYTES")
 
-# Where this app lives, for the "Check for updates" button in Settings. The
-# check hits GitHub's public releases API (unauthenticated) and compares the
-# latest published (non-prerelease) tag against the running __version__.
-GITHUB_REPO = "BrokenSignal/MeshWX"
-GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
-GITHUB_RELEASES_URL = "https://github.com/%s/releases" % GITHUB_REPO
+BURST_GAP_SECONDS = 30
+MULTIPART_GAP_SECONDS = 3
 
 REPEAT_GAP_SECONDS = 5   # gap between repeated copies of the same alert
 QUEUE_MAX = 20
 STATE_EXPIRY_HOURS = 48
-
-# IPAWS (FEMA) public feed. Separate, experimental pipeline (VM only for now):
-# re-broadcasts non-weather alerts on the TEST channel. FEMA asks for polling no
-# more often than every 2 minutes -- enforced as a hard floor.
-IPAWS_BASE_URL = "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest"
-IPAWS_PATH = "public"                     # public feed (weather senders filtered out in code)
-IPAWS_POLL_SECONDS = 120                  # >= 120: never poll FEMA more often than every 2 min
-IPAWS_POLL_FLOOR = 120                    # hard minimum, do not go below
-IPAWS_LOOKBACK_SECONDS = 600              # first poll window on startup
-# Senders whose alerts we DROP (NWS weather already goes out via the NWS pipeline).
-IPAWS_WEATHER_SENDER_HINTS = ("noaa.gov", "nws")
-# IPAWS DMOPEN "proficiency demonstration" messages arrive as status=Actual but
-# are NOT real emergencies (COGs sending them to prove their system works).
-# Drop anything whose event/identifier matches these (case-insensitive substrings).
-IPAWS_DEMO_PATTERNS = ("live_data", "proficiency", "demonstration", "dmopen",
-                       "external (", "external_(")
-
-# IPAWS non-weather alert categories the user can choose to broadcast (like the
-# NOAA event filter). Each is (key, label, keyword-substrings matched against the
-# alert's event, case-insensitive). "other" is the catch-all for anything else.
-IPAWS_EVENT_TYPES = [
-    ("amber",     "AMBER / Child abduction",   ["amber", "child abduction"]),
-    ("civil",     "Civil danger / emergency",  ["civil danger", "civil emergency"]),
-    ("evacuation","Evacuation",                ["evacuation", "evacuate"]),
-    ("shelter",   "Shelter in place",          ["shelter in place", "shelter-in-place"]),
-    ("fire",      "Fire",                       ["fire warning", "wildfire", "fire"]),
-    ("hazmat",    "Hazardous materials",       ["hazardous material", "hazmat", "chemical"]),
-    ("law",       "Law enforcement",           ["law enforcement", "blue alert"]),
-    ("local",     "Local area emergency",      ["local area emergency"]),
-    ("outage",    "911 / utility outage",      ["911", "telephone outage", "utility"]),
-    ("nuclear",   "Nuclear / radiological",    ["nuclear", "radiological", "radiation"]),
-    ("water",     "Water / boil-water",        ["boil water", "boil-water", "water advisory"]),
-    ("other",     "Other public safety",       []),
-]

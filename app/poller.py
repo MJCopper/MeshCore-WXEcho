@@ -1,35 +1,36 @@
-"""NWS polling background task.
-
-Owns the poll loop: fetch active alerts, filter, dedupe, format, and hand
-transmissions to the TransmitManager. Errors never crash the loop; they are
-logged and surfaced to the UI error log. Runtime status is exposed for the
-dashboard.
-"""
+"""BOM polling background task."""
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime, timezone
 
-from .config import POLL_INTERVAL_MIN, POLL_HARD_TIMEOUT
+from .bom import BOMClient, BOMError
+from .bom_enricher import BOMWarningEnricher
+from .config import (
+    BURST_GAP_SECONDS,
+    FINAL_VERIFICATION_MESSAGE,
+    MULTIPART_GAP_SECONDS,
+    POLL_INTERVAL_MIN,
+    POLL_HARD_TIMEOUT,
+)
 from .dedupe import decide
 from .filters import FilterRules
-from .formatter import build_mesh_text
+from .formatter import build_mesh_parts
 from .models import Alert
-from .nws import NWSClient, NWSError
 
-logger = logging.getLogger("mesh_wx.poller")
+logger = logging.getLogger("wx_echo.poller")
 
 
 class PollerStatus:
     def __init__(self):
         self.last_poll_time: str | None = None
-        self.last_poll_success_time: str | None = None   # last poll that actually reached NWS
+        self.last_poll_success_time: str | None = None
         self.last_poll_result: str = "not yet polled"
         self.last_raw_response: str = ""
-        self.last_broadcast_failure: str | None = None    # last alert that failed on all radios
+        self.last_broadcast_failure: str | None = None
         self.last_broadcast_failure_text: str = ""
-        self.clock_skew_seconds: float | None = None      # system clock vs NWS server time
+        self.clock_skew_seconds: float | None = None
         self.started_at: datetime = datetime.now(timezone.utc)
 
     @property
@@ -37,7 +38,7 @@ class PollerStatus:
         return int((datetime.now(timezone.utc) - self.started_at).total_seconds())
 
 
-class WxPoller:
+class BomPoller:
     def __init__(self, db, transmit_manager):
         self._db = db
         self._tx = transmit_manager
@@ -45,11 +46,11 @@ class WxPoller:
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
         self._stopped = False
+        self._enricher = BOMWarningEnricher()
 
-    # ---- lifecycle ------------------------------------------------------
     def start(self) -> None:
         self._stopped = False
-        self._task = asyncio.create_task(self._run(), name="nws-poller")
+        self._task = asyncio.create_task(self._run(), name="bom-poller")
 
     async def stop(self) -> None:
         self._stopped = True
@@ -62,22 +63,17 @@ class WxPoller:
                 pass
 
     def poke(self) -> None:
-        """Wake the loop early (e.g. after a settings change)."""
         self._wake.set()
 
-    # ---- loop -----------------------------------------------------------
     async def _run(self) -> None:
         while not self._stopped:
             try:
-                # Hard watchdog: no single poll may hang the loop. If poll_once
-                # wedges (network black-hole, DB lock, a bug), abort it and let the
-                # next cycle run -- a stuck poller is a silent blind spot.
                 await asyncio.wait_for(self.poll_once(), timeout=POLL_HARD_TIMEOUT)
             except asyncio.TimeoutError:
                 self.status.last_poll_result = "error: poll timed out (aborted by watchdog)"
                 self._db.add_error("poller", "poll hung and was aborted after %ds" % POLL_HARD_TIMEOUT)
                 logger.error("poll_once exceeded %ds; aborted by watchdog", POLL_HARD_TIMEOUT)
-            except Exception as exc:  # never let the loop die
+            except Exception as exc:
                 self.status.last_poll_result = f"error: {exc}"
                 self._db.add_error("poller", str(exc))
                 logger.exception("unexpected poll error")
@@ -92,136 +88,124 @@ class WxPoller:
 
     async def poll_once(self) -> None:
         settings = self._db.all_settings()
-        zones = settings.get("zones", "SCZ050")
-        contact = settings.get("nws_contact", "")
-        client = NWSClient(contact=contact)
+        regions = settings.get("bom_regions", ["NSW"])
+        contact = settings.get("bom_contact", "")
+        self._enricher.contact = contact
+        client = BOMClient(contact=contact)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            data, raw = await client.fetch_active(zones)
-        except NWSError as exc:
+            items, raw = await client.fetch_active(
+                regions, districts=settings.get("bom_districts", []))
+        except BOMError as exc:
             self.status.last_poll_time = now
             self.status.last_poll_result = f"error: {exc}"
-            self._db.add_error("nws", str(exc))
-            self._db.add_event("ERROR", f"NWS poll failed: {exc}")
+            self._db.add_error("bom", str(exc))
+            self._db.add_event("ERROR", f"BOM poll failed: {exc}")
             return
 
         self.status.last_poll_time = now
         self.status.last_poll_success_time = now
         self.status.last_raw_response = raw
-        # Clock-skew check: compare our clock to the NWS server's Date header. A
-        # skewed VM clock makes "until" times wrong and can break time-based dedup.
-        srv = getattr(client, "last_server_date", None)
-        if srv:
+        server_date = getattr(client, "last_server_date", None)
+        if server_date:
             try:
                 from email.utils import parsedate_to_datetime
-                server_dt = parsedate_to_datetime(srv)
+                server_dt = parsedate_to_datetime(server_date)
                 self.status.clock_skew_seconds = (
                     datetime.now(timezone.utc) - server_dt).total_seconds()
             except Exception:
                 pass
-        features = data.get("features", []) or []
-        self.status.last_poll_result = f"ok: {len(features)} active alert(s)"
+        self.status.last_poll_result = f"ok: {len(items)} active BOM warning(s)"
 
         self._db.purge_expired_state()
         self._db.prune_history()
 
         rules = FilterRules.from_settings(settings)
-        tz_name = settings.get("display_timezone", "")
-        channel = int(settings.get("channel_index", 0))
+        tz_name = settings.get("display_timezone", "Australia/Sydney")
+        channel = int(settings.get("meshcore_channel", 0))
         dry_run = bool(settings.get("dry_run", True))
 
-        for feature in features:
+        for item in items:
             try:
-                await self._process(feature, rules, tz_name, channel, dry_run)
+                await self._process(item, rules, tz_name, channel, dry_run)
             except Exception as exc:
-                logger.exception("error processing feature")
+                logger.exception("error processing BOM warning")
                 self._db.add_error("poller", f"process error: {exc}")
 
-    async def _process(self, feature, rules, tz_name, channel, dry_run) -> None:
-        alert = Alert.from_feature(feature)
-        if not alert.nws_id:
+    async def _process(self, item, rules, tz_name, channel, dry_run) -> None:
+        alert = Alert.from_bom(item)
+        if not alert.alert_id:
             return
         decision = decide(alert, rules, self._db.get_state)
+        if decision.transmit and decision.disposition != "cancelled" and alert.references:
+            enrichment = await self._enricher.enrich(alert.references[0])
+            alert.specific_locations = enrichment.locations
+            alert.warning_summary = enrichment.summary
+        parts = [_format_cancel(alert, tz_name)] if decision.disposition == "cancelled" else build_mesh_parts(alert, tz_name)
+        parts.append(FINAL_VERIFICATION_MESSAGE)
+        logged_text = " || ".join(parts)
 
-        if decision.disposition == "cancelled":
-            text = _format_cancel(alert, tz_name)
-        else:
-            # Build the payload: SPS gets relabelled with its extracted threat;
-            # "until" uses the hazard end (alert.ends); upcoming alerts show a
-            # start->end window.
-            text = build_mesh_text(alert, tz_name)
-
-        # Audit log: record every distinct alert pulled from NOAA exactly once
-        # (deduped by nws_id -- we re-poll every cycle), with its disposition and
-        # the reason from decide(). Lets any alert be looked up to see whether we
-        # received it and why it did or didn't go out. Re-polls add no new row.
-        if not self._db.history_exists(alert.nws_id):
-            _detail = decision.detail
-            _logged_text = ""
-            if decision.transmit:
-                _logged_text = text
-                if dry_run:
-                    _detail = f"DRY-RUN: {decision.detail}"
-            self._db.add_history(
-                alert.nws_id, alert.event, alert.area_desc,
-                decision.disposition, _logged_text, _detail,
-            )
+        if not self._db.history_exists(alert.alert_id):
+            detail = decision.detail
+            history_text = logged_text if decision.transmit else ""
+            if decision.transmit and dry_run:
+                detail = f"DRY-RUN: {decision.detail}"
+            self._db.add_history(alert.alert_id, alert.event, alert.area_desc,
+                                 decision.disposition, history_text, detail)
 
         if not decision.transmit:
             return
-
-        # Transmit path (history already recorded above).
         if dry_run:
-            self._db.add_event("INFO", f"[DRY-RUN] would send: {text}")
-            self._record_state(alert, decision)   # unchanged: dedup while paused
-        else:
-            # Record dedup state (so we don't repeat) ONLY when the broadcast is
-            # verified to have gone out. If it fails on every radio, we leave the
-            # state UNrecorded so the next poll retries this alert, and raise a
-            # loud alarm -- a warning that did not go out must not be forgotten.
-            fail_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for part in parts:
+                self._db.add_event("INFO", f"[DRY-RUN] would send: {part}")
+            self._record_state(alert, decision)
+            return
 
-            def _on_result(ok, err="", a=alert, d=decision, t=text, ts=fail_ts):
-                if ok:
-                    self._record_state(a, d)
-                else:
-                    self.status.last_broadcast_failure = ts
-                    self.status.last_broadcast_failure_text = t
-                    self._db.add_error(
-                        "broadcast", f"NOT SENT on any radio (will retry): {t}")
-                    self._db.add_event(
-                        "ALARM", f"BROADCAST FAILED, will retry: {a.event} for "
-                                 f"{(a.area_desc or '')[:40]}")
-                    logger.error("broadcast FAILED on all radios: %s", t)
+        fail_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        aggregate = {"remaining": len(parts), "all_ok": True, "first_err": ""}
 
-            self._tx.enqueue(text, channel, on_result=_on_result)
-            self._db.add_event("INFO", f"queued {decision.disposition}: {text}")
-        logger.info(
-            "alert %s -> %s%s", alert.nws_id, decision.disposition,
-            " (dry-run)" if dry_run else "",
-            extra={"alert_id": alert.nws_id,
-                   "disposition": decision.disposition,
-                   "action": "dry-run" if dry_run else "queued"},
-        )
+        def _on_result(ok, err="", a=alert, d=decision, t=logged_text, ts=fail_ts):
+            if not ok:
+                aggregate["all_ok"] = False
+                if not aggregate["first_err"]:
+                    aggregate["first_err"] = err or "unknown transmit failure"
+            aggregate["remaining"] -= 1
+            if aggregate["remaining"] > 0:
+                return
+            if aggregate["all_ok"]:
+                self._record_state(a, d)
+                return
+            self.status.last_broadcast_failure = ts
+            self.status.last_broadcast_failure_text = t
+            self._db.add_error("broadcast", f"NOT SENT on MeshCore (will retry): {aggregate['first_err']} :: {t}")
+            self._db.add_event("ALARM", f"BROADCAST FAILED, will retry: {a.event} for {(a.area_desc or '')[:40]}")
+            logger.error("broadcast FAILED on MeshCore: %s", t)
+
+        for idx, part in enumerate(parts):
+            delay_after = MULTIPART_GAP_SECONDS if idx < (len(parts) - 1) else BURST_GAP_SECONDS
+            self._tx.enqueue(part, channel, on_result=_on_result, delay_after=delay_after)
+        self._db.add_event("INFO", f"queued {decision.disposition} ({len(parts)} part): {logged_text}")
+        logger.info("alert %s -> %s%s", alert.alert_id, decision.disposition,
+                    " (dry-run)" if dry_run else "",
+                    extra={"alert_id": alert.alert_id,
+                           "disposition": decision.disposition,
+                           "action": "dry-run" if dry_run else "queued"})
 
     def _record_state(self, alert: Alert, decision) -> None:
-        # Only called on the transmit path (sent / update / cancelled), so the
-        # dedupe row always records a genuine broadcast.
-        sent_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._db.upsert_state(
-            nws_id=alert.nws_id,
+            alert_id=alert.alert_id,
             event=alert.event,
             headline=alert.headline,
             expires=alert.expires,
             msg_hash=alert.content_hash(),
             disposition=decision.disposition,
-            sent_ts=sent_ts,
+            sent_ts=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
 
 
 def _format_cancel(alert: Alert, tz_name: str) -> str:
-    from .formatter import PREFIX, _area_string
     from .config import MAX_PAYLOAD_BYTES
+    from .formatter import PREFIX, _area_string
 
     area = _area_string(alert.area_desc)
     body = f"CANCELLED: {alert.event}"

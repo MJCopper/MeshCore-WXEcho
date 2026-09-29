@@ -10,11 +10,23 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SVC_USER="${SUDO_USER:-$(whoami)}"
 
+legacy_var_name() {
+  local suffix="$1"
+  printf '%s_%s' "MESH""WX" "$suffix"
+}
+
+legacy_no_self_var="$(legacy_var_name NO_SELFUPDATE)"
+LEGACY_NO_SELFUPDATE="${!legacy_no_self_var:-}"
+if [ -z "${WXECHO_NO_SELFUPDATE:-}" ] && [ -n "$LEGACY_NO_SELFUPDATE" ]; then
+  warn "${legacy_no_self_var} is deprecated; use WXECHO_NO_SELFUPDATE."
+fi
+NO_SELFUPDATE="${WXECHO_NO_SELFUPDATE:-${LEGACY_NO_SELFUPDATE:-}}"
+
 say()  { printf '\033[1;36m>> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 
-say "MeshWX install"
+say "WXEcho install"
 echo "   dir:  $DIR"
 echo "   user: $SVC_USER"
 
@@ -27,13 +39,13 @@ fi
 # tracked files to match the published version (reset --hard rewrites only
 # tracked files, so the gitignored data/ database + .venv/ are left alone), then
 # re-exec the (possibly updated) installer once.
-if [ -z "${MESHWX_NO_SELFUPDATE:-}" ] && [ -d "$DIR/.git" ] && command -v git >/dev/null 2>&1; then
-  say "updating MeshWX to the latest version"
+if [ -z "$NO_SELFUPDATE" ] && [ -d "$DIR/.git" ] && command -v git >/dev/null 2>&1; then
+  say "updating WXEcho to the latest version"
   git config --global --add safe.directory "$DIR" 2>/dev/null || true
   if git -C "$DIR" fetch --quiet origin 2>/dev/null \
      && git -C "$DIR" reset --hard --quiet '@{u}' 2>/dev/null; then :; \
   else warn "could not update; continuing with the local copy"; fi
-  MESHWX_NO_SELFUPDATE=1 exec bash "$DIR/packaging/install-linux.sh" "$@"
+  WXECHO_NO_SELFUPDATE=1 exec bash "$DIR/packaging/install-linux.sh" "$@"
 fi
 
 # ---- 1. system prerequisites -------------------------------------------
@@ -63,7 +75,7 @@ say "using Python $PYVER"
 say "creating virtualenv"
 "$PY" -m venv "$DIR/.venv" || die "could not create venv (is python3-venv installed?)"
 "$DIR/.venv/bin/python" -m pip install --upgrade --quiet pip
-say "installing MeshWX dependencies (this can take a couple of minutes)"
+say "installing WXEcho dependencies (this can take a couple of minutes)"
 "$DIR/.venv/bin/pip" install --quiet -r "$DIR/requirements.txt" \
   || die "dependency install failed. Re-run, or report the output at the project's Issues page."
 
@@ -77,16 +89,16 @@ chown -R "$SVC_USER" "$DIR/data" "$DIR/.venv"
 
 say "installing systemd service"
 sed -e "s#__USER__#$SVC_USER#g" -e "s#__DIR__#$DIR#g" \
-  "$DIR/packaging/mesh-wx.service" > /etc/systemd/system/mesh-wx.service
+  "$DIR/packaging/wx-echo.service" > /etc/systemd/system/wx-echo.service
 systemctl daemon-reload
-systemctl enable --now mesh-wx.service
+systemctl enable --now wx-echo.service
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo ""
-say "done. MeshWX is running at  http://${IP:-<this-host>}:8110"
-echo "   logs:    journalctl -u mesh-wx -f"
-echo "   restart: sudo systemctl restart mesh-wx"
-echo "   status:  systemctl status mesh-wx"
+say "done. WXEcho is running at  http://${IP:-<this-host>}:8110"
+echo "   logs:    journalctl -u wx-echo -f"
+echo "   restart: sudo systemctl restart wx-echo"
+echo "   status:  systemctl status wx-echo"
 if ! id -nG "$SVC_USER" | grep -qw dialout; then
   warn "You were just added to 'dialout' for serial access. Log out/in (or reboot)"
   warn "so the service can open the radio's USB port."

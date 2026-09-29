@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %} &middot; MeshCore Settings{% endblock %}
+{% block content %}
+<div class="topbar">
+  <h2 class="pt">MeshCore Settings</h2>
+  <a class="see" href="/meshcore/settings">Refresh</a>
+</div>
+{% if saved %}<p class="hint">{{ "Device name" if saved == "name" else "Channel name" }} saved on the radio.</p>{% endif %}
+{% if error %}
+<div class="panel"><p>{{ error }}</p></div>
+{% else %}
+  <section class="panel">
+    <h3>Companion radio</h3>
+    <div class="row">
+      <div><span class="fld-lbl">Model</span><div>{{ device.model or "Unknown" }}</div></div>
+      <div><span class="fld-lbl">Firmware</span><div>{{ device.firmware or "Unknown" }}</div></div>
+      <div><span class="fld-lbl">Battery</span><div>{{ device.battery_mv ~ " mV" if device.battery_mv is not none else "Unknown" }}</div></div>
+    </div>
+    {% if editable %}
+    <form method="post" action="/meshcore/settings/name">
+      <label for="device-name">Device name</label>
+      <div class="row" style="align-items:end;">
+        <div><input id="device-name" name="name" value="{{ device.name }}" maxlength="32" required></div>
+        <div><button type="submit">Save name</button></div>
+      </div>
+    </form>
+    {% else %}<div class="kv"><span class="k">Device name</span><span class="v">{{ device.name or "Unnamed" }}</span></div>{% endif %}
+  </section>
+  <section class="panel">
+    <h3>Radio parameters</h3>
+    <div class="row">
+      <div><span class="fld-lbl">TX power</span><div>{{ device.tx_power if device.tx_power is not none else "Unknown" }}{% if device.tx_power is not none %} dBm{% endif %}</div></div>
+      <div><span class="fld-lbl">Frequency</span><div>{{ device.radio_freq if device.radio_freq is not none else "Unknown" }}{% if device.radio_freq is not none %} MHz{% endif %}</div></div>
+      <div><span class="fld-lbl">Bandwidth</span><div>{{ device.radio_bw if device.radio_bw is not none else "Unknown" }}{% if device.radio_bw is not none %} kHz{% endif %}</div></div>
+      <div><span class="fld-lbl">SF / CR</span><div>{{ device.radio_sf if device.radio_sf is not none else "?" }} / {{ device.radio_cr if device.radio_cr is not none else "?" }}</div></div>
+    </div>
+  </section>
+  <section class="panel">
+    <h3>Channels</h3>
+    {% for channel in device.channels %}
+      {% if editable %}
+      <form method="post" action="/meshcore/settings/channel/{{ channel.index }}">
+        <label for="channel-{{ channel.index }}">{{ channel.index }} &middot; {{ channel.name }}</label>
+        <div class="row" style="align-items:end;">
+          <div><input id="channel-{{ channel.index }}" name="name" value="{{ channel.name }}" maxlength="32" required></div>
+          <div><button type="submit">Save name</button></div>
+        </div>
+      </form>
+      {% else %}<div class="kv"><span class="k">{{ channel.index }}</span><span class="v">{{ channel.name }}</span></div>{% endif %}
+    {% else %}<p class="hint">No configured channels reported.</p>{% endfor %}
+  </section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Bureau of Meteorology warnings for New South Wales</title>
+    <item>
+      <title>Severe Thunderstorm Warning for Illawarra</title>
+      <link>https://www.bom.gov.au/warning/severe-thunderstorm-warning/IDN21001</link>
+      <guid>https://www.bom.gov.au/warning/severe-thunderstorm-warning/IDN21001</guid>
+      <pubDate>Mon, 28 Sep 2026 08:00:00 +0000</pubDate>
+      <description>Severe thunderstorms are occurring in the Illawarra district.</description>
+    </item>
+    <item>
+      <title>Cancellation of Severe Thunderstorm Warning for Hunter</title>
+      <link>https://www.bom.gov.au/warning/severe-thunderstorm-warning/IDN21002</link>
+      <guid>https://www.bom.gov.au/warning/severe-thunderstorm-warning/IDN21002</guid>
+      <pubDate>Mon, 28 Sep 2026 08:05:00 +0000</pubDate>
+      <description>The warning is cancelled.</description>
+    </item>
+  </channel>
+</rss>

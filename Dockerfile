@@ -1,10 +1,10 @@
 FROM python:3.12-slim
 
-# Meshtastic/pyserial need no build tools at runtime; keep the image lean.
+# MeshCore/pyserial need no build tools at runtime; keep the image lean.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    MESH_WX_DB=/data/mesh-wx.db \
-    MESH_WX_PORT=8000
+    WX_ECHO_DB=/data/wx-echo.db \
+    WX_ECHO_PORT=8000
 
 WORKDIR /app
 

@@ -54,13 +54,13 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.11.1
       - name: Build
-        run: pyinstaller packaging/meshwx.spec
+        run: pyinstaller packaging/wxecho.spec
       - name: Zip bundle
-        run: Compress-Archive -Path dist/MeshWX/* -DestinationPath MeshWX-windows-${{ github.ref_name }}.zip
+        run: Compress-Archive -Path dist/WXEcho/* -DestinationPath WXEcho-windows-${{ github.ref_name }}.zip
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: MeshWX-windows-${{ github.ref_name }}.zip
+          files: WXEcho-windows-${{ github.ref_name }}.zip
           generate_release_notes: true
           # A tag with a hyphen (e.g. v1.0.3-rc1) is a prerelease: keep it out of
           # "Latest" so test builds never supersede a real release.

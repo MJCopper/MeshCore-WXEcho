@@ -1,6 +1,6 @@
-# PyInstaller spec — MeshWX standalone (onedir) build.
-# Build from the repo root:   pyinstaller packaging/meshwx.spec
-# Produces dist/MeshWX/ containing MeshWX(.exe) plus everything it needs.
+# PyInstaller spec — WXEcho standalone (onedir) build.
+# Build from the repo root:   pyinstaller packaging/wxecho.spec
+# Produces dist/WXEcho/ containing WXEcho(.exe) plus everything it needs.
 import os
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -13,7 +13,7 @@ binaries = []
 hiddenimports = collect_submodules("app")
 
 # These libraries load submodules / data files dynamically, so sweep them whole.
-for pkg in ("meshtastic", "meshcore", "uvicorn", "tzdata"):
+for pkg in ("meshcore", "uvicorn", "tzdata"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -37,7 +37,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="MeshWX",
+    name="WXEcho",
     console=True,
     disable_windowed_traceback=False,
 )
@@ -47,5 +47,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="MeshWX",
+    name="WXEcho",
 )

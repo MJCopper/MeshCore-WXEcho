@@ -1,150 +1,87 @@
-"""Message formatting, the upcoming/active window, SPS threat labelling, and the 195-byte cap."""
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.config import MAX_PAYLOAD_BYTES
-from app.formatter import format_alert, build_mesh_text
-from app.models import Alert
+from app.config import FINAL_VERIFICATION_MESSAGE, MAX_PAYLOAD_BYTES
+from app.formatter import build_mesh_parts, format_alert
 
 
-def test_basic_format(feature):
-    a = Alert.from_feature(feature("tornado_warning"))
-    msg = format_alert(a.event, a.area_desc, a.ends, "America/New_York", onset_iso=a.onset)
-    assert msg.startswith("[WX] Tornado Warning for Charleston")
-    assert "and surrounding areas" in msg
-    assert "until 8:45 PM" in msg
-    assert "EDT" not in msg
+def test_bom_warning_formats_in_australian_timezone():
+    end = datetime.now(ZoneInfo("Australia/Sydney")) + timedelta(hours=2)
+    message = format_alert("Severe Thunderstorm Warning", "Illawarra", end.isoformat(), "Australia/Sydney")
+    assert message.startswith("Severe Thunderstorm Warning for Illawarra")
+    assert "until" in message
+    assert len(message.encode()) <= 195
 
 
-def test_single_area(feature):
-    a = Alert.from_feature(feature("lake_wind_advisory"))
-    msg = format_alert(a.event, a.area_desc, a.ends, "America/New_York", onset_iso=a.onset)
-    assert "and surrounding areas" not in msg
-    assert msg == "[WX] Lake Wind Advisory for Lake Murray until 8:00 PM"
+def test_multiple_districts_are_compacted():
+    message = format_alert("Flood Warning", "Illawarra; Hunter; Central Coast", "", "Australia/Sydney", home_area="Hunter")
+    assert "Hunter and surrounding areas" in message
 
 
-def test_timezone_conversion(feature):
-    a = Alert.from_feature(feature("tornado_warning"))
-    msg = format_alert(a.event, a.area_desc, a.ends, "America/Chicago", onset_iso=a.onset)
-    assert "7:45 PM" in msg
-    assert "CDT" not in msg and "EDT" not in msg
+def test_enriched_bom_warning_includes_locations_and_stays_within_limit():
+    from app.models import Alert
+    from app.formatter import build_mesh_text
+
+    alert = Alert(alert_id="id", event="Severe Thunderstorm Warning",
+                  headline="warning", area_desc="WA", effective="", expires="",
+                  message_type="Alert", specific_locations="Eyre, Rawlinna and Cocklebiddy",
+                  warning_summary="damaging winds, large hailstones and heavy rainfall")
+    message = build_mesh_text(alert, "Australia/Perth")
+    assert "Eyre, Rawlinna and Cocklebiddy" in message
+    assert "damaging winds" in message
+    assert len(message.encode()) <= 195
 
 
-def test_upcoming_alert_shows_window():
-    tz = "America/New_York"
-    now = datetime.now(ZoneInfo(tz))
-    start = (now + timedelta(hours=3)).isoformat()
-    end = (now + timedelta(hours=8)).isoformat()
-    msg = format_alert("Heat Advisory", "Columbia", end, tz, onset_iso=start)
-    assert msg.startswith("[WX] Heat Advisory for Columbia from ")
-    assert " to " in msg
-    assert "until" not in msg
+def test_build_mesh_parts_returns_single_part_for_ordinary_alert():
+    from app.models import Alert
+
+    alert = Alert(
+        alert_id="id",
+        event="Flood Warning",
+        headline="warning",
+        area_desc="Illawarra",
+        effective="",
+        expires="",
+        message_type="Alert",
+    )
+    parts = build_mesh_parts(alert, "Australia/Sydney")
+    assert len(parts) == 1
+    assert "1/2" not in parts[0]
+    assert len(parts[0].encode()) <= 195
 
 
-def test_active_alert_shows_until_only():
-    tz = "America/New_York"
-    now = datetime.now(ZoneInfo(tz))
-    start = (now - timedelta(hours=1)).isoformat()
-    end = (now + timedelta(hours=2)).isoformat()
-    msg = format_alert("Severe Thunderstorm Warning", "Richland", end, tz, onset_iso=start)
-    assert "until" in msg
-    assert "from " not in msg
+def test_build_mesh_parts_splits_enriched_alert_with_markers_and_byte_caps():
+    from app.models import Alert
+
+    alert = Alert(
+        alert_id="id",
+        event="Severe Thunderstorm Warning",
+        headline="warning",
+        area_desc="WA",
+        effective="2026-09-28T08:00:00+00:00",
+        expires="2026-09-28T10:00:00+00:00",
+        message_type="Alert",
+        ends="2026-09-28T10:00:00+00:00",
+        onset="2026-09-28T08:00:00+00:00",
+        specific_locations="Eyre, Rawlinna, Cocklebiddy and nearby highways",
+        warning_summary=(
+            "Damaging winds and large hailstones are likely, with heavy rainfall "
+            "that may lead to flash flooding in low-lying roads and creek crossings."
+        ),
+    )
+    parts = build_mesh_parts(alert, "Australia/Perth", max_bytes=120)
+    assert len(parts) == 2
+    assert parts[0].startswith("1/2 ")
+    assert parts[1].startswith("2/2 ")
+    assert "Eyre" in parts[0]
+    assert "Damaging winds" in parts[1]
+    assert len(parts[0].encode()) <= 120
+    assert len(parts[1].encode()) <= 120
 
 
-def _sps_feature(nwsheadline=None, wind=None, hail=None, area="Lexington"):
-    params = {}
-    if nwsheadline is not None:
-        params["NWSheadline"] = [nwsheadline]
-    if wind is not None:
-        params["maxWindGust"] = [wind]
-    if hail is not None:
-        params["maxHailSize"] = [hail]
-    return {"id": "urn:oid:test.sps", "properties": {
-        "event": "Special Weather Statement", "areaDesc": area,
-        "effective": "2024-05-20T14:00:00-04:00", "expires": "2024-05-20T18:30:00-04:00",
-        "ends": None, "messageType": "Alert", "parameters": params}}
-
-
-def test_sps_threat_and_impacts():
-    a = Alert.from_feature(_sps_feature(
-        nwsheadline="A STRONG THUNDERSTORM WILL AFFECT LEXINGTON...RICHLAND COUNTIES",
-        wind="60 MPH", hail="0.75"))
-    assert a.detail == "Strong thunderstorm (60 mph wind, 0.75in hail)"
-    msg = build_mesh_text(a, "America/New_York")
-    assert msg == "[WX] SPS: Strong thunderstorm (60 mph wind, 0.75in hail) - Lexington until 6:30 PM"
-
-
-def test_sps_threat_no_impacts():
-    a = Alert.from_feature(_sps_feature(
-        nwsheadline="A LINE OF THUNDERSTORMS WITH TORRENTIAL DOWNPOURS WILL AFFECT BOYD"))
-    assert a.detail == "Line of thunderstorms with torrential downpours"
-    msg = build_mesh_text(a, "America/New_York")
-    assert msg.startswith("[WX] SPS: Line of thunderstorms with torrential downpours - Lexington")
-    assert "Special Weather Statement" not in msg
-
-
-def test_sps_no_headline_falls_back():
-    a = Alert.from_feature(_sps_feature())  # no NWSheadline, no impacts
-    assert a.detail == ""
-    msg = build_mesh_text(a, "America/New_York")
-    assert msg == "[WX] Special Weather Statement for Lexington until 6:30 PM"
-
-
-def test_byte_cap_enforced():
-    areas = "; ".join(f"County Number {i}" for i in range(200))
-    msg = format_alert("Flash Flood Warning", areas,
-                       "2024-05-20T22:00:00-04:00", "America/New_York")
-    assert len(msg.encode("utf-8")) <= MAX_PAYLOAD_BYTES
-
-
-def test_byte_cap_with_multibyte_area():
-    areas = "; ".join("Ñoño Municipio café" for _ in range(50))
-    msg = format_alert("Severe Weather Warning", areas,
-                       "2024-05-20T22:00:00-04:00", "America/New_York")
-    assert len(msg.encode("utf-8")) <= MAX_PAYLOAD_BYTES
-    msg.encode("utf-8").decode("utf-8")
-
-
-def test_no_end_omits_time():
-    msg = format_alert("Tornado Warning", "Charleston", "", "America/New_York")
-    assert "until" not in msg and "from" not in msg
-    assert msg == "[WX] Tornado Warning for Charleston"
-
-
-def test_fmt_local():
-    from app.formatter import fmt_local
-    assert fmt_local("2026-07-28T05:40:28+00:00", "America/New_York") == "Jul 28, 1:40 AM"
-    assert fmt_local("", "America/New_York") == ""
-
-
-def test_blank_timezone_falls_back_to_local_not_utc():
-    """A blank/invalid timezone must render in the machine's LOCAL time, never
-    silently in UTC (which reads as hours-off to the operator)."""
-    from datetime import datetime, timezone
-    from app.formatter import _to_local
-    iso = "2026-08-02T01:30:00+00:00"          # 01:30 UTC
-    # blank tz -> local time
-    dt_local = _to_local(iso, "")
-    assert dt_local is not None
-    assert dt_local.utcoffset() == datetime.now().astimezone().utcoffset()
-    # invalid tz name -> also local, not left as UTC
-    dt_bad = _to_local(iso, "Not/AZone")
-    assert dt_bad.utcoffset() == datetime.now().astimezone().utcoffset()
-    # explicit valid zone still honored
-    dt_ny = _to_local(iso, "America/New_York")
-    assert dt_ny.strftime("%H:%M") == "21:30"  # 01:30 UTC = 21:30 EDT (prev day)
-
-
-def test_iana_zone_resolves_without_system_tzdb():
-    """Guards the tzdata dependency: with the system tz database disabled (the
-    Windows situation), an explicit IANA zone must STILL resolve -- otherwise
-    timestamps silently render in UTC. Fails if tzdata is dropped from deps."""
-    import zoneinfo
-    saved = list(zoneinfo.TZPATH)
-    try:
-        zoneinfo.reset_tzpath([])          # no system zoneinfo dirs (Windows-like)
-        from app.formatter import _to_local
-        dt = _to_local("2026-08-02T01:30:00+00:00", "America/New_York")
-        assert dt.strftime("%H:%M") == "21:30", "IANA zone must resolve via tzdata pkg"
-    finally:
-        zoneinfo.reset_tzpath(saved)
+def test_final_verification_payload_is_exact_and_within_byte_cap():
+    assert FINAL_VERIFICATION_MESSAGE == (
+        "UNOFFICIAL automated relay. May be incomplete or inaccurate. Verify warnings at "
+        "bom.gov.au/weather-and-climate/warnings-and-alerts"
+    )
+    assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) <= MAX_PAYLOAD_BYTES

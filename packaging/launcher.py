@@ -1,6 +1,6 @@
 """Desktop launcher for the packaged (PyInstaller) builds.
 
-Starts the MeshWX web server and opens the dashboard in the default browser.
+Starts the WXEcho web server and opens the dashboard in the default browser.
 Used as the entry point for the Windows/Linux standalone bundles; the Docker
 image and `python -m app.main` path do NOT use this.
 """
@@ -8,13 +8,27 @@ from __future__ import annotations
 
 import os
 import socket
+import sys
 import threading
 import time
 import webbrowser
 
-# Sensible defaults for a double-click launch; env vars still override.
-os.environ.setdefault("MESH_WX_HOST", "127.0.0.1")
-os.environ.setdefault("MESH_WX_PORT", "8000")
+def _legacy_env_name(name: str) -> str:
+    return name.replace("WX_ECHO", "".join(["MESH", "_WX"]), 1)
+
+
+def _env_with_legacy(name: str, default: str) -> str:
+    val = os.environ.get(name)
+    if val is not None:
+        return val
+    legacy = _legacy_env_name(name)
+    legacy_val = os.environ.get(legacy)
+    if legacy_val is not None:
+        print(f"warning: {legacy} is deprecated; use {name} instead.", file=sys.stderr)
+        os.environ[name] = legacy_val
+        return legacy_val
+    os.environ.setdefault(name, default)
+    return os.environ[name]
 
 
 def _open_browser(host: str, port: int, url: str) -> None:
@@ -34,15 +48,15 @@ def _open_browser(host: str, port: int, url: str) -> None:
 
 
 def main() -> None:
-    host = os.environ.get("MESH_WX_HOST", "127.0.0.1")
-    port = os.environ.get("MESH_WX_PORT", "8000")
+    host = _env_with_legacy("WX_ECHO_HOST", "127.0.0.1")
+    port = _env_with_legacy("WX_ECHO_PORT", "8000")
     # 0.0.0.0 isn't browsable; point the browser at loopback.
     browse_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     url = f"http://{browse_host}:{port}"
     print("=" * 60)
-    print(f"  MeshWX is starting - your browser will open at {url}")
+    print(f"  WXEcho is starting - your browser will open at {url}")
     print("  (first launch can take a few seconds)")
-    print("  Keep this window open. Close it to stop MeshWX.")
+    print("  Keep this window open. Close it to stop WXEcho.")
     print("=" * 60)
     threading.Thread(target=_open_browser, args=(browse_host, int(port), url),
                      daemon=True).start()

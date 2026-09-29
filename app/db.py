@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 CREATE TABLE IF NOT EXISTS alert_state (
-    nws_id      TEXT PRIMARY KEY,
+    alert_id    TEXT PRIMARY KEY,
     event       TEXT,
     headline    TEXT,
     expires     TEXT,
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS alert_state (
 CREATE TABLE IF NOT EXISTS history (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     ts               TEXT NOT NULL,
-    nws_id           TEXT,
+    alert_id         TEXT,
     event            TEXT,
     area             TEXT,
     disposition      TEXT,
@@ -69,27 +69,9 @@ CREATE TABLE IF NOT EXISTS events (
     message TEXT
 );
 
--- IPAWS (FEMA) alerts: kept fully separate from the NWS weather pipeline above.
-CREATE TABLE IF NOT EXISTS ipaws_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts          TEXT NOT NULL,
-    identifier  TEXT UNIQUE,
-    sender      TEXT,
-    event       TEXT,
-    area        TEXT,
-    headline    TEXT,
-    msg_type    TEXT,
-    status      TEXT,
-    sent        TEXT,
-    text        TEXT,
-    transmitted INTEGER,
-    error       TEXT
-);
-
 CREATE INDEX IF NOT EXISTS idx_history_ts ON history(ts);
 CREATE INDEX IF NOT EXISTS idx_history_disp ON history(disposition);
 CREATE INDEX IF NOT EXISTS idx_txlog_ts ON transmit_log(ts);
-CREATE INDEX IF NOT EXISTS idx_ipaws_ts ON ipaws_log(ts);
 """
 
 
@@ -155,15 +137,15 @@ class Database:
             self._conn.commit()
 
     # ---- alert dedupe state --------------------------------------------
-    def get_state(self, nws_id: str) -> Optional[sqlite3.Row]:
+    def get_state(self, alert_id: str) -> Optional[sqlite3.Row]:
         with self._lock:
             return self._conn.execute(
-                "SELECT * FROM alert_state WHERE nws_id = ?", (nws_id,)
+                "SELECT * FROM alert_state WHERE alert_id = ?", (alert_id,)
             ).fetchone()
 
     def upsert_state(
         self,
-        nws_id: str,
+        alert_id: str,
         event: str,
         headline: str,
         expires: str,
@@ -174,10 +156,10 @@ class Database:
         with self._lock:
             self._conn.execute(
                 """INSERT INTO alert_state
-                   (nws_id, event, headline, expires, msg_hash, sent_ts,
+                   (alert_id, event, headline, expires, msg_hash, sent_ts,
                     disposition, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(nws_id) DO UPDATE SET
+                   ON CONFLICT(alert_id) DO UPDATE SET
                        event=excluded.event,
                        headline=excluded.headline,
                        expires=excluded.expires,
@@ -185,7 +167,7 @@ class Database:
                        sent_ts=COALESCE(excluded.sent_ts, alert_state.sent_ts),
                        disposition=excluded.disposition,
                        updated_at=excluded.updated_at""",
-                (nws_id, event, headline, expires, msg_hash, sent_ts,
+                (alert_id, event, headline, expires, msg_hash, sent_ts,
                  disposition, _now()),
             )
             self._conn.commit()
@@ -205,7 +187,7 @@ class Database:
     # ---- history --------------------------------------------------------
     def add_history(
         self,
-        nws_id: str,
+        alert_id: str,
         event: str,
         area: str,
         disposition: str,
@@ -214,28 +196,28 @@ class Database:
     ) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO history(ts, nws_id, event, area, disposition, "
+                "INSERT INTO history(ts, alert_id, event, area, disposition, "
                 "transmitted_text, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (_now(), nws_id, event, area, disposition,
+                (_now(), alert_id, event, area, disposition,
                  transmitted_text, detail),
             )
             self._conn.commit()
 
-    def history_exists(self, nws_id: str, disposition: Optional[str] = None) -> bool:
+    def history_exists(self, alert_id: str, disposition: Optional[str] = None) -> bool:
         # True if a history row exists for this alert id (optionally a specific
         # disposition). With disposition=None it dedupes by id alone, so each
-        # alert pulled from NOAA is logged only once despite re-polling.
+        # alert pulled from BOM is logged only once despite re-polling.
         with self._lock:
             if disposition is None:
                 row = self._conn.execute(
-                    "SELECT 1 FROM history WHERE nws_id = ? LIMIT 1",
-                    (nws_id,),
+                    "SELECT 1 FROM history WHERE alert_id = ? LIMIT 1",
+                    (alert_id,),
                 ).fetchone()
             else:
                 row = self._conn.execute(
-                    "SELECT 1 FROM history WHERE nws_id = ? AND disposition = ? "
+                    "SELECT 1 FROM history WHERE alert_id = ? AND disposition = ? "
                     "LIMIT 1",
-                    (nws_id, disposition),
+                    (alert_id, disposition),
                 ).fetchone()
         return row is not None
 
@@ -285,7 +267,7 @@ class Database:
         text: str,
         manual: bool = False,
         error: str = "",
-        transport: str = "meshtastic",
+        transport: str = "meshcore",
     ) -> None:
         cols = ("ts, channel, byte_count, success, manual, text, error, transport")
         vals = (_now(), channel, byte_count, int(success), int(manual), text, error, transport)
@@ -347,52 +329,6 @@ class Database:
             return self._conn.execute(
                 "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
-
-    # ---- IPAWS (separate from the weather pipeline) --------------------
-    def ipaws_seen(self, identifier: str) -> bool:
-        with self._lock:
-            return self._conn.execute(
-                "SELECT 1 FROM ipaws_log WHERE identifier = ?", (identifier,)
-            ).fetchone() is not None
-
-    def add_ipaws(self, identifier, sender, event, area, headline, msg_type,
-                  status, sent, text, transmitted, error="") -> None:
-        with self._lock:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO ipaws_log(ts, identifier, sender, event, area, "
-                "headline, msg_type, status, sent, text, transmitted, error) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (_now(), identifier, sender, event, area, headline, msg_type,
-                 status, sent, text, 1 if transmitted else 0, error),
-            )
-            self._conn.commit()
-
-    def update_ipaws(self, identifier: str, transmitted: bool, error: str = "") -> None:
-        with self._lock:
-            self._conn.execute(
-                "UPDATE ipaws_log SET transmitted = ?, error = ? WHERE identifier = ?",
-                (1 if transmitted else 0, error, identifier))
-            self._conn.commit()
-
-    def get_ipaws(self, identifier: str):
-        with self._lock:
-            return self._conn.execute(
-                "SELECT * FROM ipaws_log WHERE identifier = ?", (identifier,)
-            ).fetchone()
-
-    def query_ipaws(self, limit: int = 60) -> list[sqlite3.Row]:
-        with self._lock:
-            return self._conn.execute(
-                "SELECT * FROM ipaws_log ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
-
-    def prune_ipaws(self, keep_days: int = 14) -> int:
-        with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM ipaws_log WHERE ts < datetime('now', ?)",
-                ("-%d days" % keep_days,))
-            self._conn.commit()
-            return cur.rowcount
 
     def close(self) -> None:
         with self._lock:

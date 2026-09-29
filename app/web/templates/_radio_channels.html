@@ -1,41 +1,45 @@
-<div id="{{ radio }}-channels">
-  {% set opts = channels or [] %}
-  {% set include_sel = "[name='meshtastic_conn'],[name='serial_port'],[name='meshtastic_host']" if radio == 'meshtastic' else "[name='meshcore_conn'],[name='meshcore_port'],[name='meshcore_host']" %}
+{% set has_channels = channels and (channels|length > 0) %}
+{% set channel_indexes = channels | map(attribute='index') | list if has_channels else [] %}
 
-  <button type="button" class="{% if connected %}secondary{% endif %}"
-          hx-post="/settings/channels/{{ radio }}" hx-include="{{ include_sel }}"
-          hx-target="#{{ radio }}-channels" hx-swap="outerHTML"
-          hx-indicator="#{{ radio }}-load">
-    {% if connected %}Reconnect &amp; reload channels{% else %}Connect &amp; load channels{% endif %}
-  </button>
-  <span id="{{ radio }}-load" class="htmx-indicator hint"> reading from the radio&hellip;</span>
+{% if model or connected %}
+<p class="hint">
+  {% if model %}Detected radio: {{ model }}{% else %}Connected radio detected{% endif %}
+</p>
+{% endif %}
 
-  <div style="margin:.7rem 0 .2rem;">
-    {% if connected %}
-      <span class="dot ok">Connected</span>{% if model %} <span class="hint">{{ model }}</span>{% endif %}
-    {% elif error %}
-      <span class="dot bad">Not connected</span> <span class="hint">{{ error }}</span>
+{% if error %}
+<p class="hint" style="color:#b42318;">{{ error }}</p>
+{% endif %}
+
+<div class="row" style="margin-top:12px;">
+  <div>
+    <label>Live channel</label>
+    {% if has_channels %}
+    <select name="{{ live_field }}">
+      {% for ch in channels %}
+      <option value="{{ ch.index }}" {% if (ch.index | int) == (live_val | int) %}selected{% endif %}>{{ ch.index }} - {{ ch.name }}</option>
+      {% endfor %}
+      {% if (live_val | int) not in channel_indexes %}
+      <option value="{{ live_val }}" selected>{{ live_val }} - current</option>
+      {% endif %}
+    </select>
     {% else %}
-      <span class="hint">Not connected. Click <b>Connect &amp; load channels</b> to read this radio.</span>
+    <input name="{{ live_field }}" type="number" min="0" value="{{ live_val }}">
     {% endif %}
   </div>
-
-  <div class="row">
-    <div><label>Live channel (real alerts &amp; manual sends)</label>
-      <select name="{{ live_field }}">
-        {% if opts %}
-          {% for c in opts %}<option value="{{ c.index }}" {% if c.index == live_val %}selected{% endif %}>{{ c.index }}: {{ c.name }}</option>{% endfor %}
-        {% else %}
-          <option value="{{ live_val }}" selected>{{ live_val }} (load channels for names)</option>
-        {% endif %}
-      </select></div>
-    <div><label>Test channel (troubleshoot tests)</label>
-      <select name="{{ test_field }}">
-        {% if opts %}
-          {% for c in opts %}<option value="{{ c.index }}" {% if c.index == test_val %}selected{% endif %}>{{ c.index }}: {{ c.name }}</option>{% endfor %}
-        {% else %}
-          <option value="{{ test_val }}" selected>{{ test_val }} (load channels for names)</option>
-        {% endif %}
-      </select></div>
+  <div>
+    <label>Test channel</label>
+    {% if has_channels %}
+    <select name="{{ test_field }}">
+      {% for ch in channels %}
+      <option value="{{ ch.index }}" {% if (ch.index | int) == (test_val | int) %}selected{% endif %}>{{ ch.index }} - {{ ch.name }}</option>
+      {% endfor %}
+      {% if (test_val | int) not in channel_indexes %}
+      <option value="{{ test_val }}" selected>{{ test_val }} - current</option>
+      {% endif %}
+    </select>
+    {% else %}
+    <input name="{{ test_field }}" type="number" min="0" value="{{ test_val }}">
+    {% endif %}
   </div>
 </div>

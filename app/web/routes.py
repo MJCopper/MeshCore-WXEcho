@@ -6,15 +6,13 @@ import sys
 from pathlib import Path
 import datetime
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-import httpx
 
 from .. import __version__
-from ..config import (MAX_PAYLOAD_BYTES, POLL_INTERVAL_MIN, IPAWS_EVENT_TYPES,
-                      GITHUB_LATEST_RELEASE_API, GITHUB_RELEASES_URL)
-from ..serial_discovery import list_all_ports
+from ..config import MAX_PAYLOAD_BYTES, POLL_INTERVAL_MIN, device_writes_enabled
+from ..meshcore_discovery import find_meshcore_devices
 
 
 def _template_dir() -> Path:
@@ -105,9 +103,8 @@ def _spark(counts):
 def _dash_ctx(request) -> dict:
     db, tx, poller = _db(request), _tx(request), _poller(request)
     tz = db.get_setting("display_timezone", "")
-    zones = [z.strip() for z in (db.get_setting("zones", "") or "").split(",") if z.strip()]
-    forecast = [z for z in zones if len(z) > 2 and z[2] == "Z"]
-    county = [z for z in zones if len(z) > 2 and z[2] == "C"]
+    regions = list(db.get_setting("bom_regions", ["NSW"]) or [])
+    zones = list(db.get_setting("bom_districts", []) or [])
     port = tx.port or ""
     device = "Heltec V3" if ("CP210" in port or "Silicon_Labs" in port) else (port.split("/")[-1] if port else "(none)")
     up = poller.status.uptime_seconds
@@ -153,16 +150,16 @@ def _dash_ctx(request) -> dict:
         except Exception:
             return None
     problems = []          # (level, message); level in {"critical","warn"}
-    # 1. Are we still reaching NWS? A stale success time = we are blind to alerts.
+    # 1. Are we still reaching BOM? A stale success time = we are blind to alerts.
     succ_age = _age_s(st.last_poll_success_time)
     stale_after = max(interval * 3, 360)
     if succ_age is None:
-        problems.append(("warn", "No successful NWS poll yet."))
+        problems.append(("warn", "No successful BOM poll yet."))
     elif succ_age > stale_after:
         problems.append(("critical",
-            "Not reaching NWS: last good poll %d min ago. Not receiving alerts." % (succ_age // 60)))
+            "Not reaching BOM: last good poll %d min ago. Not receiving alerts." % (succ_age // 60)))
     if st.last_poll_result.startswith("error"):
-        problems.append(("warn", "Last NWS poll errored: %s" % st.last_poll_result[7:][:80]))
+        problems.append(("warn", "Last BOM poll errored: %s" % st.last_poll_result[7:][:80]))
     # 2. Radios: any enabled radio offline means alerts may not go out.
     radios = tx.status()
     on = [r for r in radios if r["enabled"]]
@@ -182,11 +179,11 @@ def _dash_ctx(request) -> dict:
     # 4. Backed-up queue.
     if tx.queue_depth > 5:
         problems.append(("warn", "Transmit queue backed up (%d waiting)." % tx.queue_depth))
-    # 5. System clock skew vs NWS: makes alert "until" times wrong.
+    # 5. System clock skew vs BOM: makes alert "until" times wrong.
     skew = getattr(st, "clock_skew_seconds", None)
     if skew is not None and abs(skew) > 120:
         problems.append(("warn",
-            "System clock is off by %d s vs NWS. Alert times may be wrong; check the VM clock."
+            "System clock is off by %d s vs BOM. Alert times may be wrong; check the VM clock."
             % int(abs(skew))))
     health_level = ("critical" if any(l == "critical" for l, _ in problems)
                     else "warn" if problems else "ok")
@@ -198,7 +195,7 @@ def _dash_ctx(request) -> dict:
         "dry_run": bool(db.get_setting("dry_run", True)),
         "connected": tx.connected, "device": device, "tx_error": tx.last_error,
         "channel_index": int(db.get_setting("channel_index", 0)),
-        "zone_count": len(zones), "forecast_count": len(forecast), "county_count": len(county),
+        "zone_count": len(zones), "forecast_count": len(regions), "county_count": len(zones),
         "poll_interval": int(db.get_setting("poll_interval", 120)), "queue_depth": tx.queue_depth,
         "last_poll_local": fmt_local(poller.status.last_poll_time, tz) if poller.status.last_poll_time else "-",
         "uptime_str": uptime_str, "sent_7d": sent_7d, "sent_today": sent_today,
@@ -232,29 +229,6 @@ async def status_partial(request: Request):
 async def dashboard_cols_partial(request: Request):
     # The recent-alerts list + radios + broadcasting columns, for live polling.
     return render(request, "_dash_cols.html", **_dash_ctx(request))
-
-
-@router.get("/partials/ipaws", response_class=HTMLResponse)
-async def ipaws_partial(request: Request):
-    # IPAWS (FEMA) dashboard panel -- separate from the weather pipeline.
-    db = _db(request)
-    st = getattr(request.app.state, "ipaws", None)
-    return render(request, "_ipaws_panel.html", ipaws_rows=db.query_ipaws(30),
-                  ipaws_status=(st.status if st else None))
-
-
-@router.get("/ipaws", response_class=HTMLResponse)
-async def ipaws_history(request: Request):
-    # Full IPAWS history page (mirrors the NOAA History page).
-    db = _db(request)
-    st = getattr(request.app.state, "ipaws", None)
-    return render(request, "ipaws_history.html", ipaws_rows=db.query_ipaws(200),
-                  ipaws_status=(st.status if st else None))
-
-
-@router.get("/partials/ipaws-history", response_class=HTMLResponse)
-async def ipaws_history_partial(request: Request):
-    return render(request, "_ipaws_rows.html", ipaws_rows=_db(request).query_ipaws(200))
 
 
 @router.post("/dry-run/toggle", response_class=HTMLResponse)
@@ -315,36 +289,13 @@ async def resend_log(request: Request, entry_id: int):
 
 
 
-_STATES = [
-    ("AL","Alabama"),("AK","Alaska"),("AZ","Arizona"),("AR","Arkansas"),("CA","California"),
-    ("CO","Colorado"),("CT","Connecticut"),("DE","Delaware"),("DC","District of Columbia"),
-    ("FL","Florida"),("GA","Georgia"),("HI","Hawaii"),("ID","Idaho"),("IL","Illinois"),
-    ("IN","Indiana"),("IA","Iowa"),("KS","Kansas"),("KY","Kentucky"),("LA","Louisiana"),
-    ("ME","Maine"),("MD","Maryland"),("MA","Massachusetts"),("MI","Michigan"),("MN","Minnesota"),
-    ("MS","Mississippi"),("MO","Missouri"),("MT","Montana"),("NE","Nebraska"),("NV","Nevada"),
-    ("NH","New Hampshire"),("NJ","New Jersey"),("NM","New Mexico"),("NY","New York"),
-    ("NC","North Carolina"),("ND","North Dakota"),("OH","Ohio"),("OK","Oklahoma"),("OR","Oregon"),
-    ("PA","Pennsylvania"),("RI","Rhode Island"),("SC","South Carolina"),("SD","South Dakota"),
-    ("TN","Tennessee"),("TX","Texas"),("UT","Utah"),("VT","Vermont"),("VA","Virginia"),
-    ("WA","Washington"),("WV","West Virginia"),("WI","Wisconsin"),("WY","Wyoming"),
-    ("PR","Puerto Rico"),("VI","U.S. Virgin Islands"),("GU","Guam"),
-]
-
-# Timezones offered in Settings. MeshWX serves the US NWS, so this is the US /
-# territories set plus an "Automatic" option (blank = the device's local zone).
 _TIMEZONES = [
-    ("", "Automatic (this device's time zone)"),
-    ("America/New_York", "Eastern (New York)"),
-    ("America/Chicago", "Central (Chicago)"),
-    ("America/Denver", "Mountain (Denver)"),
-    ("America/Phoenix", "Mountain, no DST (Arizona)"),
-    ("America/Los_Angeles", "Pacific (Los Angeles)"),
-    ("America/Anchorage", "Alaska"),
-    ("America/Adak", "Hawaii-Aleutian (Adak)"),
-    ("Pacific/Honolulu", "Hawaii (Honolulu)"),
-    ("America/Puerto_Rico", "Atlantic (Puerto Rico, U.S. Virgin Islands)"),
-    ("Pacific/Guam", "Chamorro (Guam, Northern Marianas)"),
-    ("Pacific/Pago_Pago", "Samoa (American Samoa)"),
+    ("Australia/Sydney", "Sydney / Melbourne / Canberra"),
+    ("Australia/Adelaide", "Adelaide"),
+    ("Australia/Brisbane", "Brisbane"),
+    ("Australia/Darwin", "Darwin"),
+    ("Australia/Hobart", "Hobart"),
+    ("Australia/Perth", "Perth"),
     ("UTC", "UTC"),
 ]
 
@@ -363,126 +314,39 @@ _EVENT_GROUPS = {
 }
 
 
-async def _fetch_counties(state: str, contact: str):
-    ua = "mesh-wx/1.0 (%s)" % contact if contact else "mesh-wx/1.0"
-    url = "https://api.weather.gov/zones?area=%s&type=county" % state
-    async with httpx.AsyncClient(timeout=20,
-            headers={"User-Agent": ua, "Accept": "application/geo+json"}) as c:
-        r = await c.get(url); r.raise_for_status()
-        feats = r.json().get("features", [])
-    out = [(f["properties"]["id"], f["properties"]["name"]) for f in feats]
-    return sorted(out, key=lambda x: x[1])
-
-
-@router.get("/settings/counties", response_class=HTMLResponse)
-async def settings_counties(request: Request, state: str = ""):
-    db = _db(request)
-    selected = set(z.strip() for z in (db.get_setting("zones", "") or "").split(",") if z.strip())
-    counties, err = [], ""
-    if state:
-        try:
-            counties = await _fetch_counties(state, db.get_setting("nws_contact", ""))
-        except Exception as exc:
-            err = "Could not load counties for %s (%s). Check your internet/NWS contact and retry." % (state, exc)
-    return render(request, "_counties.html", counties=counties, selected=selected, state=state, err=err)
-
-
 # ---- settings ----------------------------------------------------------
-def _parse_version(v: str) -> tuple:
-    """Leading numeric dotted parts of a version tag as an int tuple, e.g.
-    'v1.2.10' -> (1, 2, 10). Stops at the first non-numeric chunk so a
-    pre-release suffix ('1.2.0-rc1') compares on its numeric core (1, 2, 0)."""
-    core = re.split(r"[-+ ]", (v or "").strip().lstrip("vV"), maxsplit=1)[0]
-    parts = []
-    for chunk in core.split("."):
-        if chunk.isdigit():
-            parts.append(int(chunk))
-        else:
-            break
-    return tuple(parts)
-
-
-def _is_newer(latest: str, current: str) -> bool:
-    lt, cur = _parse_version(latest), _parse_version(current)
-    if not lt:
-        return False
-    n = max(len(lt), len(cur))
-    return lt + (0,) * (n - len(lt)) > cur + (0,) * (n - len(cur))
-
-
-@router.get("/settings/check-updates", response_class=HTMLResponse)
-async def check_updates(request: Request):
-    """Compare the running version against the latest GitHub release. Server-side
-    fetch (no CORS/CSP issues), read-only, gracefully degrades when offline."""
-    ctx = {"current": __version__, "latest": None,
-           "url": GITHUB_RELEASES_URL, "state": "error", "detail": ""}
-    try:
-        async with httpx.AsyncClient(
-                timeout=10,
-                headers={"User-Agent": "MeshWX-update-check",
-                         "Accept": "application/vnd.github+json"}) as client:
-            r = await client.get(GITHUB_LATEST_RELEASE_API)
-        if r.status_code == 200:
-            data = r.json()
-            ctx["latest"] = (data.get("tag_name") or "").lstrip("vV")
-            ctx["url"] = data.get("html_url") or GITHUB_RELEASES_URL
-            ctx["state"] = "update" if _is_newer(ctx["latest"], __version__) else "current"
-        elif r.status_code == 404:
-            ctx["state"] = "current"       # repo has no published releases yet
-            ctx["detail"] = "No releases published yet."
-        else:
-            ctx["detail"] = "GitHub returned HTTP %d." % r.status_code
-    except Exception:
-        ctx["detail"] = "Could not reach GitHub. Check this machine's connection."
-    return render(request, "_update_check.html", **ctx)
-
-
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     db = _db(request)
     s = db.all_settings()
-    zones = [z.strip() for z in (s.get("zones", "") or "").split(",") if z.strip()]
-    counties_sel = [z for z in zones if len(z) > 2 and z[2] == "C"]
-    extra = [z for z in zones if not (len(z) > 2 and z[2] == "C")]
-    current_state = counties_sel[0][:2] if counties_sel else ""
-    county_list = []
-    if current_state:
-        try:
-            county_list = await _fetch_counties(current_state, s.get("nws_contact", ""))
-        except Exception:
-            county_list = []
+    mc_channels = s.get("meshcore_channels", []) or []
+    mc_model = s.get("meshcore_model", "") or ""
+    mc_connected = _status_flag(request, "meshcore")
     return render(
         request, "settings.html", s=s, min_interval=POLL_INTERVAL_MIN, ports=None,
-        states=_STATES, current_state=current_state, state=current_state,
         timezones=_TIMEZONES, tz_current=(s.get("display_timezone", "") or ""),
         tz_known={v for v, _ in _TIMEZONES},
-        counties=county_list, selected=set(counties_sel), extra_zones=", ".join(extra),
         event_groups=_EVENT_GROUPS,
         selected_events=set(s.get("filter_include_exact", []) or []),
         all_warnings=bool(s.get("filter_include_suffix", []) or []), err="",
-        ipaws_enabled=bool(s.get("ipaws_enabled", True)),
-        ipaws_send_tests=bool(s.get("ipaws_send_tests", False)),
-        ipaws_event_types=IPAWS_EVENT_TYPES,
-        ipaws_selected=set(s.get("ipaws_events", None) if s.get("ipaws_events", None) is not None
-                           else [k for k, _l, _kw in IPAWS_EVENT_TYPES]),
-        mt_enabled=bool(s.get("meshtastic_enabled", True)),
-        mt_conn=s.get("meshtastic_conn", "serial") or "serial",
-        mt_host=s.get("meshtastic_host", "") or "",
-        mt_channel=int(s.get("channel_index", 0) or 0),
-        mt_port=s.get("serial_port", "") or "",
-        mc_enabled=bool(s.get("meshcore_enabled", False)),
+        mc_enabled=bool(s.get("meshcore_enabled", True)),
         mc_conn=s.get("meshcore_conn", "serial") or "serial",
         mc_port=s.get("meshcore_port", "") or "",
         mc_host=s.get("meshcore_host", "") or "",
         mc_channel=int(s.get("meshcore_channel", 0) or 0),
-        mt_test=int(s.get("meshtastic_test_channel", 1) or 1),
         mc_test=int(s.get("meshcore_test_channel", 1) or 1),
-        mt_channels=s.get("meshtastic_channels", []) or [],
-        mc_channels=s.get("meshcore_channels", []) or [],
-        mt_connected=_status_flag(request, "meshtastic"),
-        mc_connected=_status_flag(request, "meshcore"),
-        mt_model=s.get("meshtastic_model", "") or "",
-        mc_model=s.get("meshcore_model", "") or "",
+        mc_channels=mc_channels,
+        mc_connected=mc_connected,
+        mc_model=mc_model,
+        **_channel_ctx(
+            db,
+            _tx(request),
+            "meshcore",
+            channels=mc_channels,
+            model=mc_model,
+            error="",
+            connected=mc_connected,
+        ),
     )
 
 
@@ -490,27 +354,20 @@ async def settings_page(request: Request):
 async def save_settings(
     request: Request,
     poll_interval: int = Form(...),
-    nws_contact: str = Form(...),
-    channel_index: int = Form(0),
-    display_timezone: str = Form(""),   # blank = Automatic (device local time)
-    serial_port: str = Form(""),
+    bom_contact: str = Form(""),
+    display_timezone: str = Form("Australia/Sydney"),
+    bom_regions: list[str] = Form(default=[]),
+    bom_districts: str = Form(""),
     state: str = Form(""),
     counties: list[str] = Form(default=[]),
     extra_zones: str = Form(""),
     events: list[str] = Form(default=[]),
     all_warnings: str = Form(""),
-    ipaws_enabled: str = Form(""),
-    ipaws_send_tests: str = Form(""),
-    ipaws_events: list[str] = Form(default=[]),
-    meshtastic_enabled: str = Form(""),
-    meshtastic_conn: str = Form("serial"),
-    meshtastic_host: str = Form(""),
     meshcore_enabled: str = Form(""),
     meshcore_conn: str = Form("serial"),
     meshcore_port: str = Form(""),
     meshcore_host: str = Form(""),
     meshcore_channel: int = Form(0),
-    meshtastic_test_channel: int = Form(1),
     meshcore_test_channel: int = Form(1),
 ):
     def _rep(v):
@@ -521,31 +378,20 @@ async def save_settings(
     db, tx, poller = _db(request), _tx(request), _poller(request)
     interval = max(POLL_INTERVAL_MIN, int(poll_interval))
 
-    zone_list = [c.strip() for c in counties if c.strip()]
-    zone_list += [z.strip() for z in extra_zones.split(",") if z.strip()]
-    db.set_setting("zones", ",".join(zone_list))
+    db.set_setting("bom_regions", [r.strip().upper() for r in bom_regions if r.strip()])
+    db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
     db.set_setting("poll_interval", interval)
-    db.set_setting("nws_contact", nws_contact.strip())
-    db.set_setting("channel_index", int(channel_index))
+    db.set_setting("bom_contact", bom_contact.strip())
     db.set_setting("display_timezone", display_timezone.strip())
     db.set_setting("filter_include_exact", [e for e in events if e])
     db.set_setting("filter_include_suffix", ["Warning"] if all_warnings else [])
     db.set_setting("filter_exclude_exact", [])
 
-    # Radios - Meshtastic + MeshCore, each independently enabled.
-    db.set_setting("ipaws_enabled", bool(ipaws_enabled))
-    db.set_setting("ipaws_send_tests", bool(ipaws_send_tests))
-    db.set_setting("ipaws_events", [e for e in ipaws_events if e])
-    db.set_setting("meshtastic_enabled", bool(meshtastic_enabled))
-    db.set_setting("meshtastic_conn", (meshtastic_conn or "serial").strip())
-    db.set_setting("meshtastic_host", meshtastic_host.strip())
-    db.set_setting("serial_port", serial_port.strip())
     db.set_setting("meshcore_enabled", bool(meshcore_enabled))
     db.set_setting("meshcore_conn", (meshcore_conn or "serial").strip())
     db.set_setting("meshcore_port", meshcore_port.strip())
     db.set_setting("meshcore_host", meshcore_host.strip())
     db.set_setting("meshcore_channel", int(meshcore_channel))
-    db.set_setting("meshtastic_test_channel", int(meshtastic_test_channel))
     db.set_setting("meshcore_test_channel", int(meshcore_test_channel))
 
     # Rebuild transports from the new settings and (re)connect the enabled ones.
@@ -556,24 +402,13 @@ async def save_settings(
     return RedirectResponse("/settings", status_code=303)
 
 
-@router.post("/settings/scan", response_class=HTMLResponse)
-async def scan_ports(request: Request, target: str = Form("serial_port")):
-    ports = list_all_ports()
-    # only allow the two known field ids to be scripted into the page
-    field = target if target in ("serial_port", "meshcore_port") else "serial_port"
-    return render(request, "_ports.html", ports=ports, target=field)
-
-
 _RADIO_FIELDS = {
-    "meshtastic": ("meshtastic_conn", "serial_port", "meshtastic_host",
-                   "channel_index", "meshtastic_test_channel"),
     "meshcore":   ("meshcore_conn", "meshcore_port", "meshcore_host",
                    "meshcore_channel", "meshcore_test_channel"),
 }
 
 
 _INCLUDE_SEL = {
-    "meshtastic": "[name='meshtastic_conn'],[name='serial_port'],[name='meshtastic_host']",
     "meshcore": "[name='meshcore_conn'],[name='meshcore_port'],[name='meshcore_host']",
 }
 
@@ -618,6 +453,61 @@ async def load_channels(request: Request, name: str):
     return render(request, "_radio_channels.html", **ctx)
 
 
+@router.post("/settings/detect-ports", response_class=HTMLResponse)
+async def detect_meshcore_ports(request: Request):
+    devices = await find_meshcore_devices()
+    return render(request, "_meshcore_ports.html", devices=devices)
+
+
+@router.get("/meshcore/settings", response_class=HTMLResponse)
+async def meshcore_settings_page(request: Request, saved: str = ""):
+    device = None
+    error = ""
+    try:
+        device = await _tx(request).get_device_settings()
+    except RuntimeError as exc:
+        error = str(exc)
+    return render(request, "meshcore_settings.html", device=device,
+                  editable=device_writes_enabled(), error=error,
+                  saved=saved if saved in {"name", "channel"} else "")
+
+
+def _require_device_writes() -> None:
+    if not device_writes_enabled():
+        raise HTTPException(status_code=403, detail="Companion settings writes are disabled")
+
+
+def _device_edit_error(request: Request, error: str, status_code: int):
+    response = render(request, "meshcore_settings.html", device=None,
+                      editable=device_writes_enabled(), error=error, saved="")
+    response.status_code = status_code
+    return response
+
+
+@router.post("/meshcore/settings/name", response_class=HTMLResponse)
+async def save_meshcore_name(request: Request, name: str = Form(...)):
+    _require_device_writes()
+    try:
+        await _tx(request).set_device_name(name)
+    except ValueError as exc:
+        return _device_edit_error(request, str(exc), 400)
+    except RuntimeError as exc:
+        return _device_edit_error(request, str(exc), 503)
+    return RedirectResponse("/meshcore/settings?saved=name", status_code=303)
+
+
+@router.post("/meshcore/settings/channel/{index}", response_class=HTMLResponse)
+async def save_meshcore_channel(request: Request, index: int, name: str = Form(...)):
+    _require_device_writes()
+    try:
+        await _tx(request).rename_device_channel(index, name)
+    except ValueError as exc:
+        return _device_edit_error(request, str(exc), 400)
+    except RuntimeError as exc:
+        return _device_edit_error(request, str(exc), 503)
+    return RedirectResponse("/meshcore/settings?saved=channel", status_code=303)
+
+
 # ---- manual send -------------------------------------------------------
 @router.get("/manual", response_class=HTMLResponse)
 async def manual_page(request: Request):
@@ -654,7 +544,7 @@ async def clear_errors(request: Request):
 @router.post("/troubleshoot/test", response_class=HTMLResponse)
 async def send_test(request: Request):
     tx = _tx(request)
-    text = "[WX] mesh-wx test message"
+    text = "WXEcho test message"
     ok = await tx.send_test(text)   # goes on each radio's TEST channel
     return render(
         request, "_manual_result.html", ok=ok,
@@ -667,7 +557,7 @@ async def send_test(request: Request):
 async def send_test_one(request: Request, name: str):
     tx = _tx(request)
     label = {t["name"]: t["label"] for t in tx.status()}.get(name, name)
-    text = "[WX] mesh-wx test via %s" % label
+    text = "WXEcho test via %s" % label
     ok, err = await tx.send_to(name, text)
     return render(
         request, "_manual_result.html", ok=ok,
@@ -679,7 +569,7 @@ async def send_test_one(request: Request, name: str):
 @router.get("/troubleshoot/raw", response_class=PlainTextResponse)
 async def raw_response(request: Request):
     raw = _poller(request).status.last_raw_response
-    return raw or "(no NWS response captured yet)"
+    return raw or "(no BOM response captured yet)"
 
 
 def _split_lines(value: str) -> list[str]:

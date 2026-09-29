@@ -1,4 +1,4 @@
-"""Multi-protocol transmit layer - Meshtastic + MeshCore, side by side.
+"""MeshCore transmit layer.
 
 Each protocol is an independent transport with its own enable flag and
 connection (serial or TCP). TransmitManager fans every outbound message out to
@@ -34,7 +34,7 @@ class TxUnsent(Exception):
         self.category = category
         self.detail = detail
 
-logger = logging.getLogger("mesh_wx.tx")
+logger = logging.getLogger("wx_echo.tx")
 
 
 class Transmitter(abc.ABC):
@@ -53,140 +53,6 @@ class Transmitter(abc.ABC):
     async def read_channels(self) -> list:
         """Return the channels configured on the device: [{index, name}]. Optional."""
         return []
-
-
-class MeshtasticTransmitter(Transmitter):
-    label = "Meshtastic"
-
-    def __init__(self, conn: str, port: str = "", host: str = ""):
-        self.conn, self.port, self.host = conn, port, host
-        self._iface = None
-        self._qstatus = {}   # firmware TX-queue verdict per packet id: {id: res}
-
-    async def connect(self) -> None:
-        if self._iface is not None:
-            await self.close()
-
-        def _open():
-            if self.conn == "tcp":
-                from meshtastic.tcp_interface import TCPInterface
-                h, _, p = (self.host or "").partition(":")
-                if p:  # explicit host:port
-                    iface = TCPInterface(hostname=h, portNumber=int(p))
-                else:
-                    iface = TCPInterface(hostname=h)
-            else:
-                from meshtastic.serial_interface import SerialInterface
-                iface = SerialInterface(devPath=self.port)
-            # Hook the firmware's per-packet TX-queue status so each send can be
-            # verified: the radio replies with a QueueStatus for the packet id,
-            # res==0 means it was accepted into the TX queue (will transmit),
-            # res!=0 means it was rejected/dropped (the silent-drop failure).
-            self._qstatus = {}
-            orig = iface._handleQueueStatusFromRadio
-            def _hook(qs):
-                try:
-                    if len(self._qstatus) > 256:
-                        self._qstatus.clear()
-                    self._qstatus[qs.mesh_packet_id] = (qs.res, qs.free)
-                except Exception:
-                    pass
-                return orig(qs)
-            iface._handleQueueStatusFromRadio = _hook
-            return iface
-
-        self._iface = await asyncio.get_event_loop().run_in_executor(None, _open)
-
-    async def send_text(self, text: str, channel: int) -> None:
-        if self._iface is None:
-            raise RuntimeError("not connected")
-
-        # res -> (category, name). The radio tells us WHY a packet was not queued.
-        cat_by_res = {4: "link", 6: "no_channel", 7: "too_large", 8: "link",
-                      9: "duty_cycle"}
-
-        def _send_and_verify():
-            pkt = self._iface.sendText(text, channelIndex=channel)
-            pid = getattr(pkt, "id", None)
-            if pid is None:
-                return  # no id to track: fall back to best-effort
-            waited = 0.0
-            while waited < 6.0:               # await the firmware's verdict
-                if pid in self._qstatus:
-                    res, free = self._qstatus.pop(pid)
-                    if res == 0:
-                        return                # accepted into TX queue -> transmits
-                    from meshtastic import mesh_pb2
-                    try:
-                        name = mesh_pb2.Routing.Error.Name(res)
-                    except Exception:
-                        name = "res=%s" % res
-                    cat = cat_by_res.get(res, "unsent")
-                    if free == 0 and cat == "unsent":
-                        cat = "queue_full"
-                    raise TxUnsent(cat, "radio did not transmit (%s)" % name)
-                time.sleep(0.15)
-                waited += 0.15
-            raise TxUnsent("link", "radio did not transmit (no queue confirmation)")
-
-        await asyncio.get_event_loop().run_in_executor(None, _send_and_verify)
-
-    async def close(self) -> None:
-        if self._iface is not None:
-            iface, self._iface = self._iface, None
-            try:
-                await asyncio.get_event_loop().run_in_executor(None, iface.close)
-            except Exception:
-                pass
-
-    @property
-    def connected(self) -> bool:
-        return self._iface is not None
-
-    async def read_channels(self) -> list:
-        if self._iface is None:
-            raise RuntimeError("not connected")
-
-        def _read():
-            out = []
-            node = getattr(self._iface, "localNode", None)
-            for ch in (getattr(node, "channels", None) or []):
-                role = int(getattr(ch, "role", 0))  # 0 DISABLED, 1 PRIMARY, 2 SECONDARY
-                if role == 0:
-                    continue
-                name = ""
-                if getattr(ch, "settings", None) is not None:
-                    name = ch.settings.name or ""
-                if not name:
-                    name = "LongFast" if role == 1 else ("channel %d" % ch.index)
-                out.append({"index": int(ch.index), "name": name})
-            return out
-
-        return await asyncio.get_event_loop().run_in_executor(None, _read)
-
-    async def read_info(self) -> dict:
-        if self._iface is None:
-            return {}
-
-        def _read():
-            info = {}
-            try:
-                ni = self._iface.getMyNodeInfo() or {}
-                hw = (ni.get("user") or {}).get("hwModel")
-                if hw:
-                    info["model"] = str(hw)
-            except Exception:
-                pass
-            try:
-                meta = getattr(self._iface, "metadata", None)
-                fw = getattr(meta, "firmware_version", "") if meta is not None else ""
-                if fw:
-                    info["firmware"] = str(fw)
-            except Exception:
-                pass
-            return info
-
-        return await asyncio.get_event_loop().run_in_executor(None, _read)
 
 
 class MeshCoreTransmitter(Transmitter):
@@ -260,7 +126,7 @@ class MeshCoreTransmitter(Transmitter):
 
     @property
     def connected(self) -> bool:
-        return self._mc is not None
+        return self._mc is not None and self._mc.is_connected
 
     async def read_channels(self) -> list:
         if self._mc is None:
@@ -292,6 +158,95 @@ class MeshCoreTransmitter(Transmitter):
         return {"model": (p.get("model") or "").strip(),
                 "firmware": (p.get("ver") or "").strip()}
 
+    async def read_settings(self) -> dict:
+        from meshcore import EventType
+
+        if not self.connected:
+            raise RuntimeError("MeshCore radio is offline")
+        info = await self._mc.commands.send_device_query()
+        if info.type != EventType.DEVICE_INFO:
+            raise RuntimeError("could not read MeshCore device info")
+        self_info = await self._mc.commands.send_appstart()
+        if self_info.type != EventType.SELF_INFO:
+            raise RuntimeError("could not read MeshCore settings")
+
+        device = info.payload or {}
+        settings = self_info.payload or {}
+        battery_mv = None
+        try:
+            battery = await self._mc.commands.get_bat()
+            if battery.type == EventType.BATTERY:
+                battery_mv = (battery.payload or {}).get("level")
+        except Exception:
+            pass
+        channels = []
+        for index in range(min(8, int(device.get("max_channels") or 8))):
+            result = await self._mc.commands.get_channel(index)
+            if result.type != EventType.CHANNEL_INFO:
+                break
+            payload = result.payload or {}
+            name = (payload.get("channel_name") or "").strip()
+            if name:
+                channels.append({"index": index, "name": name,
+                                 "hash": payload.get("channel_hash") or ""})
+        return {
+            "name": (settings.get("name") or "").strip(),
+            "model": (device.get("model") or "").strip(),
+            "firmware": (device.get("ver") or "").strip(),
+            "battery_mv": battery_mv,
+            "tx_power": settings.get("tx_power"),
+            "max_tx_power": settings.get("max_tx_power"),
+            "radio_freq": settings.get("radio_freq"),
+            "radio_bw": settings.get("radio_bw"),
+            "radio_sf": settings.get("radio_sf"),
+            "radio_cr": settings.get("radio_cr"),
+            "channels": channels,
+        }
+
+    async def set_device_name(self, name: str) -> str:
+        from meshcore import EventType
+
+        name = name.strip()
+        if not name or len(name.encode("utf-8")) > 32 or any(ord(char) < 32 for char in name):
+            raise ValueError("device name must be 1-32 UTF-8 bytes without control characters")
+        if not self.connected:
+            raise RuntimeError("MeshCore radio is offline")
+        result = await self._mc.commands.set_name(name)
+        if result.type != EventType.OK:
+            raise RuntimeError("radio rejected the device name")
+        verified = await self._mc.commands.send_appstart()
+        if verified.type != EventType.SELF_INFO or (verified.payload or {}).get("name", "").strip() != name:
+            raise RuntimeError("could not verify the saved device name")
+        return name
+
+    async def rename_channel(self, index: int, name: str) -> dict:
+        from meshcore import EventType
+
+        name = name.strip()
+        if not 0 <= index < 8:
+            raise ValueError("channel index must be 0-7")
+        if not name or name.startswith("#") or len(name.encode("utf-8")) > 32 or any(ord(char) < 32 for char in name):
+            raise ValueError("channel name must be 1-32 UTF-8 bytes and cannot start with #")
+        if not self.connected:
+            raise RuntimeError("MeshCore radio is offline")
+
+        current = await self._mc.commands.get_channel(index)
+        if current.type != EventType.CHANNEL_INFO:
+            raise RuntimeError("channel is unavailable")
+        payload = current.payload or {}
+        secret = payload.get("channel_secret")
+        if not payload.get("channel_name") or not isinstance(secret, bytes) or len(secret) != 16:
+            raise RuntimeError("channel cannot be renamed safely")
+        result = await self._mc.commands.set_channel(index, name, secret)
+        if result.type != EventType.OK:
+            raise RuntimeError("radio rejected the channel name")
+        verified = await self._mc.commands.get_channel(index)
+        updated = verified.payload or {}
+        if (verified.type != EventType.CHANNEL_INFO or updated.get("channel_name") != name
+                or updated.get("channel_secret") != secret):
+            raise RuntimeError("could not verify channel name and key preservation")
+        return {"index": index, "name": name, "hash": updated.get("channel_hash") or ""}
+
 
 def _fmt_model(info: dict) -> str:
     """Human label for a radio from its info dict, e.g. 'Heltec V3 (fw 2.5.9)'."""
@@ -304,7 +259,7 @@ def _fmt_model(info: dict) -> str:
 
 @dataclass
 class Transport:
-    name: str                     # "meshtastic" | "meshcore"
+    name: str                     # "meshcore"
     label: str
     enabled: bool
     conn: str                     # "serial" | "tcp"
@@ -321,8 +276,7 @@ class Transport:
 @dataclass
 class QueueItem:
     text: str
-    on_test: bool = False      # False = live channel (weather), True = test channel (IPAWS)
-    log_tx: bool = True        # write the weather transmit_log (False for IPAWS -- logged separately)
+    delay_after: float = BURST_GAP_SECONDS
     on_result: object = None   # optional callable(ok: bool, err: str) invoked after the send
 
 
@@ -339,25 +293,16 @@ def _build_transports(db) -> dict:
     def rep(k):
         return max(1, min(5, num(k, 2)))
 
-    mt_conn = g("meshtastic_conn", "serial") or "serial"
-    mt = Transport(
-        name="meshtastic", label="Meshtastic",
-        enabled=bool(g("meshtastic_enabled", True)),
-        conn=mt_conn, channel=num("channel_index", 0),
-        target=(g("meshtastic_host", "") if mt_conn == "tcp" else g("serial_port", "")) or "",
-        make=lambda: MeshtasticTransmitter(mt_conn, g("serial_port", "") or "", g("meshtastic_host", "") or ""),
-        repeat=rep("meshtastic_repeat"), test_channel=num("meshtastic_test_channel", 1),
-    )
     mc_conn = g("meshcore_conn", "serial") or "serial"
     mc = Transport(
         name="meshcore", label="MeshCore",
-        enabled=bool(g("meshcore_enabled", False)),
+        enabled=bool(g("meshcore_enabled", True)),
         conn=mc_conn, channel=num("meshcore_channel", 0),
         target=(g("meshcore_host", "") if mc_conn == "tcp" else g("meshcore_port", "")) or "",
         make=lambda: MeshCoreTransmitter(mc_conn, g("meshcore_port", "") or "", g("meshcore_host", "") or ""),
         repeat=rep("meshcore_repeat"), test_channel=num("meshcore_test_channel", 1),
     )
-    return {"meshtastic": mt, "meshcore": mc}
+    return {"meshcore": mc}
 
 
 class TransmitManager:
@@ -367,10 +312,10 @@ class TransmitManager:
         self._db = db
         self._transports = _build_transports(db)
         self._queue: deque[QueueItem] = deque(maxlen=QUEUE_MAX)        # high: weather/live
-        self._queue_low: deque[QueueItem] = deque(maxlen=QUEUE_MAX)    # low: IPAWS/test
         self._queue_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._worker_task: asyncio.Task | None = None
+        self._connection_task: asyncio.Task | None = None
         self._reconnect_delay = 2.0
         self._stopped = False
 
@@ -378,10 +323,17 @@ class TransmitManager:
     def start(self) -> None:
         self._stopped = False
         self._worker_task = asyncio.create_task(self._worker(), name="tx-worker")
+        self._connection_task = asyncio.create_task(self._maintain_connections(), name="radio-connection")
 
     async def stop(self) -> None:
         self._stopped = True
         self._queue_event.set()
+        if self._connection_task:
+            self._connection_task.cancel()
+            try:
+                await self._connection_task
+            except asyncio.CancelledError:
+                pass
         if self._worker_task:
             self._worker_task.cancel()
             try:
@@ -404,17 +356,34 @@ class TransmitManager:
                         pass
             self._transports = _build_transports(self._db)
             targets = [t for t in self._transports.values() if t.enabled and t.target]
-        for t in targets:
-            await self._ensure(t)
+            for t in targets:
+                await self._ensure(t)
+
+    async def _maintain_connections(self) -> None:
+        while not self._stopped:
+            await asyncio.sleep(15)
+            try:
+                async with self._lock:
+                    for transport in self._transports.values():
+                        if not transport.enabled or not transport.target:
+                            continue
+                        if transport.tx is not None and not transport.tx.connected:
+                            transport.connected = False
+                            await self._reconnect(transport)
+                        elif not transport.connected or transport.tx is None:
+                            await self._ensure(transport)
+            except Exception:
+                logger.exception("radio connection maintenance failed")
 
     # ---- status / compat ------------------------------------------------
     @property
     def connected(self) -> bool:
-        return any(t.connected for t in self._transports.values() if t.enabled)
+        return any(t.connected and t.tx is not None and t.tx.connected
+                   for t in self._transports.values() if t.enabled)
 
     @property
     def port(self) -> str | None:
-        return self._transports["meshtastic"].target or None
+        return self._transports["meshcore"].target or None
 
     @property
     def queue_depth(self) -> int:
@@ -430,19 +399,40 @@ class TransmitManager:
     def status(self) -> list[dict]:
         return [
             {"name": t.name, "label": t.label, "enabled": t.enabled,
-             "conn": t.conn, "connected": t.connected, "target": t.target,
+             "conn": t.conn, "connected": t.connected and t.tx is not None and t.tx.connected,
              "channel": t.channel, "error": t.error}
             for t in self._transports.values()
         ]
 
+    def _saved_radio(self) -> MeshCoreTransmitter:
+        transport = self._transports["meshcore"]
+        if not transport.enabled or not transport.target or not transport.connected or not transport.tx or not transport.tx.connected:
+            raise RuntimeError("saved MeshCore radio is offline")
+        return transport.tx
+
+    async def get_device_settings(self) -> dict:
+        async with self._lock:
+            return await self._saved_radio().read_settings()
+
+    async def set_device_name(self, name: str) -> str:
+        async with self._lock:
+            return await self._saved_radio().set_device_name(name)
+
+    async def rename_device_channel(self, index: int, name: str) -> dict:
+        async with self._lock:
+            renamed = await self._saved_radio().rename_channel(index, name)
+            channels = await self._saved_radio().read_channels()
+            self._db.set_setting("meshcore_channels", channels)
+            return renamed
+
     async def set_port(self, port: str) -> None:
-        """Back-compat: set the Meshtastic serial port, then reconnect."""
-        self._db.set_setting("serial_port", port or "")
+        """Set the MeshCore serial port, then reconnect."""
+        self._db.set_setting("meshcore_port", port or "")
         await self.reconfigure()
 
     # ---- connection -----------------------------------------------------
     async def _ensure(self, t: Transport) -> bool:
-        if t.connected and t.tx is not None:
+        if t.connected and t.tx is not None and t.tx.connected:
             return True
         if not t.enabled:
             return False
@@ -479,28 +469,16 @@ class TransmitManager:
                 or "errno 16" in e or "resource temporarily unavailable" in e)
 
     # ---- sending --------------------------------------------------------
-    def enqueue(self, text: str, channel: int | None = None, on_result=None) -> bool:
-        """Queue a weather alert (HIGH priority, live channel). on_result(ok, err)
+    def enqueue(self, text: str, channel: int | None = None, on_result=None,
+                delay_after: float = BURST_GAP_SECONDS) -> bool:
+        """Queue a BOM warning for the live channel. on_result(ok, err)
         fires after the send with the REAL verified outcome."""
-        return self._enqueue(self._queue, text, on_test=False, log_tx=True,
-                             on_result=on_result)
-
-    def enqueue_ipaws(self, text: str, on_test: bool = False, on_result=None) -> bool:
-        """Queue an IPAWS alert (LOW priority: weather always sends first). Real
-        alerts go on the live channel (on_test=False); test/exercise messages go
-        on the test channel (on_test=True). Not written to the weather transmit_log."""
-        return self._enqueue(self._queue_low, text, on_test=on_test, log_tx=False,
-                             on_result=on_result)
-
-    def _enqueue(self, lane, text, on_test, log_tx, on_result) -> bool:
-        dropped = len(lane) == lane.maxlen
+        dropped = len(self._queue) == self._queue.maxlen
         if dropped:
-            # The item we are about to drop never gets a send: report it failed so
-            # the caller does not record it as delivered.
-            oldest = lane[0] if lane else None
+            oldest = self._queue[0] if self._queue else None
             if oldest is not None and oldest.on_result is not None:
                 self._safe_result(oldest.on_result, False, "dropped (queue full)")
-        lane.append(QueueItem(text=text, on_test=on_test, log_tx=log_tx, on_result=on_result))
+        self._queue.append(QueueItem(text=text, delay_after=max(0.0, float(delay_after)), on_result=on_result))
         self._queue_event.set()
         if dropped:
             logger.warning("transmit queue full; dropped oldest")
@@ -555,8 +533,10 @@ class TransmitManager:
         content/config error that a retry cannot fix. Returns (ok, error)."""
         last = "not connected"
         for attempt in (1, 2, 3):
-            if t.tx is None or not t.connected:
-                if not await self._ensure(t):
+            if t.tx is None or not t.connected or not t.tx.connected:
+                t.connected = False
+                restored = await self._reconnect(t) if t.tx is not None else await self._ensure(t)
+                if not restored:
                     last = t.error or "not connected"
                     await asyncio.sleep(1)
                     continue
@@ -644,7 +624,9 @@ class TransmitManager:
                 except Exception:
                     pass
                 t.tx, t.connected = None, False
-            maker = MeshtasticTransmitter if name == "meshtastic" else MeshCoreTransmitter
+            if name != "meshcore":
+                return None, "", "unknown radio"
+            maker = MeshCoreTransmitter
             tx = maker(conn or "serial", port or "", host or "")
             try:
                 await tx.connect()
@@ -704,43 +686,32 @@ class TransmitManager:
             return ok, ("" if ok else err)
 
     async def _transmit_item(self, item: QueueItem) -> tuple[bool, str]:
-        """Send one queued item on the right channel (live vs test), verified per
-        radio. Weather items also write the transmit_log; IPAWS items do not."""
+        """Send one queued BOM warning on the live channel."""
         blen = len(item.text.encode())
         any_ok, last = False, ""
         async with self._lock:
             for t in self._transports.values():
                 if not t.enabled:
                     continue
-                ch = t.test_channel if item.on_test else t.channel
+                ch = t.channel
                 ok, err = await self._try_send(t, item.text, ch)
-                if item.log_tx:
-                    self._db.add_transmit_log(ch, blen, ok, item.text, False,
-                                              error=("" if ok else err), transport=t.name)
+                self._db.add_transmit_log(ch, blen, ok, item.text, False,
+                                          error=("" if ok else err), transport=t.name)
                 any_ok = any_ok or ok
                 if not ok:
                     last = err
         return any_ok, ("" if any_ok else last)
 
     async def _worker(self) -> None:
-        first = True
         while not self._stopped:
-            if not self._queue and not self._queue_low:
+            if not self._queue:
                 self._queue_event.clear()
                 try:
                     await self._queue_event.wait()
                 except asyncio.CancelledError:
                     return
-                first = True
                 continue
-            if not first:
-                try:
-                    await asyncio.sleep(BURST_GAP_SECONDS)   # pace EVERY send, both lanes
-                except asyncio.CancelledError:
-                    return
-            # Weather (high) always drains before IPAWS (low), so a real warning
-            # never waits behind a backlog of secondary alerts.
-            item = self._queue.popleft() if self._queue else self._queue_low.popleft()
+            item = self._queue.popleft()
             try:
                 ok, err = await self._transmit_item(item)
                 if item.on_result is not None:
@@ -752,7 +723,11 @@ class TransmitManager:
                 # kill the worker -- that would silently stop ALL future broadcasts.
                 logger.exception("transmit worker iteration error")
                 ok = False
-            first = False
+            if self._queue and item.delay_after > 0:
+                try:
+                    await asyncio.sleep(item.delay_after)
+                except asyncio.CancelledError:
+                    return
             if not ok:
                 await asyncio.sleep(self._reconnect_delay)
                 self._reconnect_delay = min(self._reconnect_delay * 2, 60.0)

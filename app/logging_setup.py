@@ -35,8 +35,7 @@ def setup_logging(level: str = "INFO") -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
-    # meshtastic/pyserial are noisy at INFO
-    logging.getLogger("meshtastic").setLevel(logging.WARNING)
+    # The radio library is noisy at INFO.
 
 
 def log(logger: logging.Logger, level: int, msg: str, **fields) -> None:

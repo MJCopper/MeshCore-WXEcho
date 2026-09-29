@@ -1,0 +1,162 @@
+"""Optional enrichment for linked Bureau of Meteorology warning pages."""
+from __future__ import annotations
+
+import asyncio
+import re
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
+from html.parser import HTMLParser
+from html import unescape
+from urllib.parse import urlparse
+
+import httpx
+
+
+
+@dataclass(frozen=True)
+class BOMEnrichment:
+    locations: str = ""
+    summary: str = ""
+
+
+class _WarningPageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.paragraphs: list[tuple[str, str]] = []
+        self._tag = ""
+        self._heading = ""
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"h1", "h2", "h3", "p"}:
+            self._tag = tag
+            self._parts = []
+
+    def handle_data(self, data):
+        if self._tag:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag != self._tag:
+            return
+        text = re.sub(r"\s+", " ", " ".join(self._parts)).strip()
+        if text and tag.startswith("h"):
+            self._heading = text
+        elif text and tag == "p":
+            self.paragraphs.append((self._heading, text))
+        self._tag = ""
+        self._parts = []
+
+
+def _clean_sentence(value: str, limit: int = 150) -> str:
+    value = re.sub(r"\s+", " ", value).strip(" .")
+    return value if len(value) <= limit else value[:limit].rsplit(" ", 1)[0] + "..."
+
+
+def parse_warning_page(raw: str) -> BOMEnrichment:
+    parser = _WarningPageParser()
+    parser.feed(raw)
+    locations = ""
+    summaries: list[tuple[int, str]] = []
+    for heading, paragraph in parser.paragraphs:
+        if heading.casefold().startswith("safety advice"):
+            continue
+        match = re.search(r"locations which may be affected include (.+?)(?:\.|$)", paragraph, re.IGNORECASE)
+        if match and not locations:
+            locations = _clean_sentence(match.group(1), 110)
+        lower = paragraph.lower()
+        if "likely to produce" in lower:
+            summaries.append((3, paragraph))
+        elif "thunderstorms are expected" in lower:
+            summaries.append((2, paragraph))
+        elif lower.startswith("weather situation:"):
+            summaries.append((1, paragraph))
+    summary = _clean_sentence(max(summaries, key=lambda item: item[0])[1], 130) if summaries else ""
+    return BOMEnrichment(locations=locations, summary=summary)
+
+
+def _strip_markup(value: str) -> str:
+    value = re.sub(r"<[^>]+>", " ", value or "")
+    return re.sub(r"\s+", " ", unescape(value)).strip()
+
+
+def parse_warning_api(payload: dict) -> BOMEnrichment:
+    warning = payload.get("warning", {}) or {}
+    info = warning.get("info", []) or []
+    summaries = []
+    locations = ""
+    geocodes = []
+    for item in info:
+        summary = _strip_markup(item.get("summary", ""))
+        if summary:
+            summaries.append(summary)
+            match = re.search(
+                r"locations which may be affected include (.+?)(?:\.|$)",
+                summary, re.IGNORECASE)
+            if match and not locations:
+                locations = _clean_sentence(match.group(1), 110)
+        for area in item.get("area", []) or []:
+            for code in area.get("geocode", []) or []:
+                name = (code.get("name") or "").strip()
+                if name and name not in geocodes:
+                    geocodes.append(name)
+    if not locations:
+        locations = _clean_sentence(
+            _strip_markup(warning.get("area_summary", "")), 110)
+    if not locations and geocodes:
+        locations = _clean_sentence(", ".join(geocodes), 110)
+    candidates = [s for s in summaries if "likely to produce" in s.lower()]
+    if not candidates:
+        candidates = summaries
+    if not candidates:
+        candidates = [_strip_markup(warning.get("phenomena_summary", ""))]
+    summary = _clean_sentence(candidates[0], 130) if candidates and candidates[0] else ""
+    return BOMEnrichment(locations=locations, summary=summary)
+
+
+def _warning_api_url(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold()
+    if host not in {"www.bom.gov.au", "reg.bom.gov.au"}:
+        return ""
+    match = re.search(r"/(ID[A-Z0-9]+)(?:\.shtml)?$", parsed.path, re.IGNORECASE)
+    if not match:
+        return ""
+    return "https://api.bom.gov.au/apikey/v1/warnings/warning/%s" % match.group(1).upper()
+
+
+class BOMWarningEnricher:
+    def __init__(self, contact: str = "", timeout: float = 7.0, cache_ttl: float = 600.0, max_cache: int = 20):
+        self.contact = contact
+        self.timeout = timeout
+        self.cache_ttl = cache_ttl
+        self.max_cache = max_cache
+        self._cache: OrderedDict[str, tuple[float, BOMEnrichment]] = OrderedDict()
+
+    async def enrich(self, url: str) -> BOMEnrichment:
+        api_url = _warning_api_url(url)
+        if not api_url:
+            return BOMEnrichment()
+        now = time.monotonic()
+        cached = self._cache.get(api_url)
+        if cached and cached[0] > now:
+            self._cache.move_to_end(api_url)
+            return cached[1]
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        }
+        result = BOMEnrichment()
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, headers=headers) as client:
+                response = await asyncio.wait_for(client.get(api_url), timeout=self.timeout)
+                response.raise_for_status()
+            result = parse_warning_api(response.json())
+        except (asyncio.TimeoutError, httpx.HTTPError, ValueError, TypeError):
+            result = BOMEnrichment()
+        self._cache[api_url] = (now + self.cache_ttl, result)
+        self._cache.move_to_end(api_url)
+        while len(self._cache) > self.max_cache:
+            self._cache.popitem(last=False)
+        return result

@@ -3,185 +3,73 @@
 {% block content %}
 <h2>Settings</h2>
 <form method="post" action="/settings">
-
   <div class="panel">
-    <h3>Coverage area</h3>
-    <p class="hint">Pick your state, then check the counties to monitor. Counties cover
-      <em>every</em> alert type - tornado, severe thunderstorm and flood warnings, plus
-      watches and advisories - so this is all most people need.</p>
-    <label>State</label>
-    <select name="state" hx-get="/settings/counties" hx-target="#counties"
-            hx-swap="innerHTML" hx-include="this">
-      <option value="">- select a state -</option>
-      {% for ab, nm in states %}
-      <option value="{{ ab }}" {% if ab == current_state %}selected{% endif %}>{{ nm }}</option>
+    <h3>BOM coverage</h3>
+    <p class="hint">Select the Australian state or territory warning feeds to monitor. District names are optional filters applied to those feeds.</p>
+    <div class="checkgrid">
+      {% for code, label in [('NSW', 'New South Wales'), ('ACT', 'Australian Capital Territory'), ('VIC', 'Victoria'), ('QLD', 'Queensland'), ('WA', 'Western Australia'), ('SA', 'South Australia'), ('TAS', 'Tasmania'), ('NT', 'Northern Territory')] %}
+      <label class="chk"><input type="checkbox" name="bom_regions" value="{{ code }}" {% if code in (s.bom_regions or []) %}checked{% endif %}> {{ label }}</label>
       {% endfor %}
-    </select>
-    <span class="fld-lbl">Counties</span>
-    <div id="counties">{% include "_counties.html" %}</div>
-    <details class="adv">
-      <summary>Advanced: extra zone codes</summary>
-      <p class="hint">Optional. Additional NWS zone codes, comma-separated - e.g. marine zones
-        (AMZ350) or forecast zones outside the counties above.</p>
-      <input name="extra_zones" value="{{ extra_zones }}" placeholder="e.g. AMZ350, GMZ850">
-    </details>
+    </div>
+    <label style="margin-top:12px;">Forecast districts (optional, one per line or comma-separated)</label>
+    <textarea name="bom_districts" rows="4" placeholder="e.g. Illawarra&#10;Hunter&#10;Central Coast">{{ (s.bom_districts or [])|join('\n') }}</textarea>
   </div>
 
   <div class="panel">
     <h3>What to broadcast</h3>
-    <label class="chk" style="margin-bottom:6px;">
-      <input type="checkbox" name="all_warnings" {% if all_warnings %}checked{% endif %}>
-      <span><b>All Warning products</b> - tornado, severe thunderstorm, flood, winter, wind, heat&hellip; <em>(recommended)</em></span>
-    </label>
-    <p class="hint">Warnings are the life-safety alerts. Leave this on and just add any watches or
-      advisories you also want below.</p>
+    <label class="chk"><input type="checkbox" name="all_warnings" {% if all_warnings %}checked{% endif %}> <b>All warning products</b></label>
+    <p class="hint">Warnings cover the life-safety products published by BOM. Add specific watches and advisories below when needed.</p>
     <div class="grp-title">Watches</div>
     <div class="checkgrid">
-      {% for ev in event_groups.Watches %}
-      <label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>
-      {% endfor %}
+      {% for ev in event_groups.Watches %}<label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>{% endfor %}
     </div>
-    <div class="grp-title">Advisories &amp; statements</div>
+    <div class="grp-title">Advisories and statements</div>
     <div class="checkgrid">
-      {% for ev in event_groups.Advisories %}
-      <label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>
-      {% endfor %}
-    </div>
-    <details class="adv">
-      <summary>Pick individual warnings instead of "All Warning products"</summary>
-      <div class="checkgrid" style="margin-top:8px;">
-        {% for ev in event_groups.Warnings %}
-        <label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>
-        {% endfor %}
-      </div>
-    </details>
-  </div>
-
-  <div class="panel">
-    <h3>Radios</h3>
-    <p class="hint">Run <b>Meshtastic</b> and/or <b>MeshCore</b> side by side. For each: pick the
-      connection, click <b>Connect &amp; load channels</b>, then choose which channel carries live
-      alerts and which carries test messages.</p>
-
-    <div class="radio-card">
-      <label class="chk"><input type="checkbox" name="meshtastic_enabled" {% if mt_enabled %}checked{% endif %}> <b>Meshtastic</b></label>
-      <div class="row" style="margin-top:12px;">
-        <div><label>Connection</label>
-          <select name="meshtastic_conn" onchange="mwxConn('mt', this.value)">
-            <option value="serial" {% if mt_conn=='serial' %}selected{% endif %}>USB (serial)</option>
-            <option value="tcp" {% if mt_conn=='tcp' %}selected{% endif %}>Network (IP / TCP)</option>
-          </select></div>
-      </div>
-
-      <div id="mt-usb" style="display:{{ 'none' if mt_conn=='tcp' else 'block' }}">
-        <label>USB serial port (COM3 on Windows &middot; /dev/ttyUSB0 &middot; /dev/ttyACM0)</label>
-        <input id="serial_port" name="serial_port" value="{{ mt_port }}"
-               placeholder="click Scan, then Use - or type it">
-        <button type="button" class="secondary" hx-post="/settings/scan"
-                hx-vals='{"target":"serial_port"}' hx-target="#ports-serial_port"
-                hx-swap="outerHTML" style="margin-top:8px;">Scan for USB ports</button>
-        <div style="margin-top:8px;">{% set target = 'serial_port' %}{% include "_ports.html" %}</div>
-      </div>
-      <div id="mt-ip" style="display:{{ 'block' if mt_conn=='tcp' else 'none' }}">
-        <label>Network address (host or host:port)</label>
-        <input name="meshtastic_host" value="{{ mt_host }}" placeholder="192.168.1.50">
-      </div>
-
-      {% set radio='meshtastic' %}{% set live_field='channel_index' %}{% set test_field='meshtastic_test_channel' %}{% set live_val=mt_channel %}{% set test_val=mt_test %}{% set channels=mt_channels %}{% set connected=mt_connected %}{% set model=mt_model %}{% set error='' %}
-      <div style="margin-top:10px;">{% include "_radio_channels.html" %}</div>
-    </div>
-
-    <div class="radio-card">
-      <label class="chk"><input type="checkbox" name="meshcore_enabled" {% if mc_enabled %}checked{% endif %}> <b>MeshCore</b></label>
-      <div class="row" style="margin-top:12px;">
-        <div><label>Connection</label>
-          <select name="meshcore_conn" onchange="mwxConn('mc', this.value)">
-            <option value="serial" {% if mc_conn=='serial' %}selected{% endif %}>USB (serial)</option>
-            <option value="tcp" {% if mc_conn=='tcp' %}selected{% endif %}>Network (IP / TCP)</option>
-          </select></div>
-      </div>
-
-      <div id="mc-usb" style="display:{{ 'none' if mc_conn=='tcp' else 'block' }}">
-        <label>USB serial port (COM3 on Windows &middot; /dev/ttyUSB0 &middot; /dev/ttyACM0)</label>
-        <input id="meshcore_port" name="meshcore_port" value="{{ mc_port }}"
-               placeholder="click Scan, then Use - or type it">
-        <button type="button" class="secondary" hx-post="/settings/scan"
-                hx-vals='{"target":"meshcore_port"}' hx-target="#ports-meshcore_port"
-                hx-swap="outerHTML" style="margin-top:8px;">Scan for USB ports</button>
-        <div style="margin-top:8px;">{% set target = 'meshcore_port' %}{% include "_ports.html" %}</div>
-      </div>
-      <div id="mc-ip" style="display:{{ 'block' if mc_conn=='tcp' else 'none' }}">
-        <label>Network address (host:port)</label>
-        <input name="meshcore_host" value="{{ mc_host }}" placeholder="192.168.1.51:4000">
-      </div>
-
-      {% set radio='meshcore' %}{% set live_field='meshcore_channel' %}{% set test_field='meshcore_test_channel' %}{% set live_val=mc_channel %}{% set test_val=mc_test %}{% set channels=mc_channels %}{% set connected=mc_connected %}{% set model=mc_model %}{% set error='' %}
-      <div style="margin-top:10px;">{% include "_radio_channels.html" %}</div>
-    </div>
-  </div>
-
-  <script>
-    function mwxConn(p, v){
-      var usb = document.getElementById(p+'-usb'), ip = document.getElementById(p+'-ip');
-      if (usb) usb.style.display = (v==='tcp') ? 'none' : 'block';
-      if (ip)  ip.style.display  = (v==='tcp') ? 'block' : 'none';
-    }
-  </script>
-
-  <div class="panel">
-    <h3>IPAWS (FEMA)</h3>
-    <p class="hint">Broadcasts public safety alerts from FEMA's IPAWS (AMBER Alerts, civil
-      emergencies, local emergency management) to your mesh, alongside NOAA weather. See the
-      <a href="/ipaws">IPAWS History</a> page.</p>
-    <label class="chk"><input type="checkbox" name="ipaws_enabled" {% if ipaws_enabled %}checked{% endif %}>
-      <b>Enable IPAWS feed</b></label>
-    <label class="chk" style="margin-top:8px;"><input type="checkbox" name="ipaws_send_tests" {% if ipaws_send_tests %}checked{% endif %}>
-      <span>Also broadcast IPAWS <b>test &amp; exercise</b> messages (tagged <code>[IPAWS TEST]</code>).
-      Handy for confirming the mesh works during quiet stretches.</span></label>
-    <span class="fld-lbl" style="margin-top:12px;">Alert types to broadcast</span>
-    <div class="checkgrid">
-      {% for key, label, kw in ipaws_event_types %}
-      <label class="chk"><input type="checkbox" name="ipaws_events" value="{{ key }}" {% if key in ipaws_selected %}checked{% endif %}> {{ label }}</label>
-      {% endfor %}
+      {% for ev in event_groups.Advisories %}<label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>{% endfor %}
     </div>
   </div>
 
   <div class="panel">
-    <h3>NOAA</h3>
+    <h3>MeshCore radio</h3>
+    <label class="chk"><input type="checkbox" name="meshcore_enabled" {% if mc_enabled %}checked{% endif %}> <b>Enable MeshCore</b></label>
+    <div class="row" style="margin-top:12px;">
+      <div><label>Connection</label><select name="meshcore_conn"><option value="serial" {% if mc_conn == 'serial' %}selected{% endif %}>USB (serial)</option><option value="tcp" {% if mc_conn == 'tcp' %}selected{% endif %}>Network (IP / TCP)</option></select></div>
+      <div>
+        <button
+          type="button"
+          class="secondary"
+          hx-post="/settings/channels/meshcore"
+          hx-target="#meshcore-channel-fields"
+          hx-swap="innerHTML"
+          hx-include="[name='meshcore_conn'],[name='meshcore_port'],[name='meshcore_host']"
+        >Load channels</button>
+      </div>
+    </div>
+
+    <div id="meshcore-channel-fields">
+      {% include "_radio_channels.html" %}
+    </div>
+
+    <label>USB serial port or network host</label>
+    <div class="row" style="align-items:end;">
+      <div><input id="meshcore_port" name="meshcore_port" value="{{ mc_port }}" placeholder="/dev/ttyUSB0 or 192.168.1.51:4000"></div>
+      <div><button type="button" class="secondary" hx-post="/settings/detect-ports" hx-target="#meshcore-ports" hx-swap="innerHTML">Auto-detect USB</button></div>
+    </div>
+    <div id="meshcore-ports" style="margin-top:12px;"></div>
+    <label style="margin-top:12px;">Network host (only for TCP)</label>
+    <input name="meshcore_host" value="{{ mc_host }}" placeholder="192.168.1.51:4000">
+  </div>
+
+  <div class="panel">
+    <h3>BOM service</h3>
     <div class="row">
-      <div><label>Poll interval (seconds, min {{ min_interval }})</label>
-        <input name="poll_interval" type="number" min="{{ min_interval }}"
-               value="{{ s.poll_interval }}" required></div>
-      <div><label>NWS contact (email, sent in the request header)</label>
-        <input name="nws_contact" value="{{ s.nws_contact }}" required></div>
-      <div><label>Display timezone</label>
-        <select name="display_timezone">
-          {% for val, lbl in timezones %}
-          <option value="{{ val }}" {% if val == tz_current %}selected{% endif %}>{{ lbl }}</option>
-          {% endfor %}
-          {% if tz_current and tz_current not in tz_known %}
-          <option value="{{ tz_current }}" selected>{{ tz_current }}</option>
-          {% endif %}
-        </select>
-        <div class="hint" style="margin-top:4px;">Sets the time zone for timestamps and alert
-          times. <b>Automatic</b> uses this device's own time zone.</div></div>
+      <div><label>Poll interval (seconds, min {{ min_interval }})</label><input name="poll_interval" type="number" min="{{ min_interval }}" value="{{ s.poll_interval }}" required></div>
+      <div><label>Contact / User-Agent</label><input name="bom_contact" value="{{ s.bom_contact }}" required></div>
+      <div><label>Display timezone</label><select name="display_timezone">{% for val, lbl in timezones %}<option value="{{ val }}" {% if val == tz_current %}selected{% endif %}>{{ lbl }}</option>{% endfor %}</select></div>
     </div>
   </div>
 
   <button type="submit">Save settings</button>
 </form>
 
-<div class="panel" style="margin-top:18px;">
-  <h3>About &amp; updates</h3>
-  <div class="row" style="align-items:center;">
-    <div>MeshWX version <b>v{{ version }}</b></div>
-    <div style="text-align:right;">
-      <button type="button" class="secondary"
-              hx-get="/settings/check-updates" hx-target="#update-result"
-              hx-swap="innerHTML" hx-indicator="#update-spin">Check for updates</button>
-      <span id="update-spin" class="htmx-indicator">checking&hellip;</span>
-    </div>
-  </div>
-  <div id="update-result" style="margin-top:12px;"></div>
-</div>
 {% endblock %}

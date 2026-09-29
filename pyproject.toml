@@ -1,15 +1,11 @@
 [project]
-name = "meshwx"
+name = "wxecho"
 version = "1.1.2"
-description = "Poll NWS weather alerts and broadcast them over Meshtastic and/or MeshCore radios"
+description = "Poll Australian BOM weather warnings and broadcast them over MeshCore"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "BrokenSignal" }]
-keywords = ["meshtastic", "meshcore", "nws", "weather", "alerts", "emergency", "lora"]
-
-[project.urls]
-Homepage = "https://brokensignal.tv/MeshWX/"
+keywords = ["meshcore", "bom", "australia", "weather", "alerts", "lora"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

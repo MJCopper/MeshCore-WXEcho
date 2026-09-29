@@ -1,16 +1,11 @@
-"""Format an alert into a Meshtastic text payload (<= 195 bytes).
+"""Format BOM alerts into MeshCore text payloads (<= 195 bytes).
 
-    "[WX] Tornado Warning for Charleston and surrounding areas until 8:45 PM"
-    "[WX] Heat Advisory for Columbia and surrounding areas from 12:00 PM to 8:00 PM"
-    "[WX] SPS: Strong thunderstorm (60 mph wind, 0.75in hail) - Columbia until 8:00 PM"
-
-Multi-county alerts are summarised as "<home area> and surrounding areas",
+Multi-area alerts are summarised as "<home area> and surrounding areas",
 anchored on the configured home area when it is one of the alert's counties
 (otherwise the first listed county). Times are local (tz abbrev dropped -- the
 mesh is regional). Upcoming alerts (onset in the future) show a start->end
-window; in-effect alerts show only "until <end>". A generic Special Weather
-Statement is relabelled "SPS: <threat>" from its NWSheadline so the mesh says
-what it's actually for. The payload is byte-capped in UTF-8, area trimmed first.
+window; in-effect alerts show only "until <end>". The payload is byte-capped
+in UTF-8, area trimmed first.
 """
 from __future__ import annotations
 
@@ -19,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import MAX_PAYLOAD_BYTES
 
-PREFIX = "[WX] "
+PREFIX = ""
 DEFAULT_HOME_AREA = "Columbia"
 
 
@@ -98,11 +93,26 @@ def _truncate_bytes(s: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
+def _truncate_words_bytes(s: str, max_bytes: int) -> str:
+    trimmed = _truncate_bytes(s, max_bytes).rstrip(" ,:;-")
+    if _byte_len(trimmed) <= max_bytes:
+        return trimmed
+    return _truncate_bytes(trimmed, max_bytes).rstrip(" ,:;-")
+
+
+def _with_part_marker(index: int, total: int, body: str) -> str:
+    return f"{PREFIX}{index}/{total} {body}".strip()
+
+
+def _part_prefix(index: int, total: int) -> str:
+    return f"{PREFIX}{index}/{total} "
+
+
 def format_alert(
     event: str,
     area_desc: str,
     ends_iso: str,
-    tz_name: str = "America/New_York",
+    tz_name: str = "Australia/Sydney",
     onset_iso: str = "",
     home_area: str = DEFAULT_HOME_AREA,
     sep: str = "for",
@@ -132,21 +142,38 @@ def format_alert(
     return _truncate_bytes(msg, max_bytes)
 
 
-def build_mesh_text(alert, tz_name: str = "America/New_York",
+def build_mesh_text(alert, tz_name: str = "Australia/Sydney",
                     max_bytes: int = MAX_PAYLOAD_BYTES) -> str:
-    """Payload for a non-cancel alert. A Special Weather Statement with an
-    extracted threat is relabelled 'SPS: <threat>' (separator '-'); everything
-    else uses '<event> for <area>'."""
-    event = alert.event
-    detail = getattr(alert, "detail", "") or ""
-    if event == "Special Weather Statement" and detail:
-        return format_alert(f"SPS: {detail}", alert.area_desc, alert.ends, tz_name,
-                            onset_iso=alert.onset, sep="-", max_bytes=max_bytes)
-    return format_alert(event, alert.area_desc, alert.ends, tz_name,
-                        onset_iso=alert.onset, sep="for", max_bytes=max_bytes)
+    """Payload for a non-cancel alert, enriched when BOM page data is available."""
+    return build_mesh_parts(alert, tz_name, max_bytes=max_bytes)[0]
 
 
-def fmt_local(iso: str, tz_name: str = "America/New_York") -> str:
+def build_mesh_parts(alert, tz_name: str = "Australia/Sydney",
+                     max_bytes: int = MAX_PAYLOAD_BYTES) -> list[str]:
+    """Return one part for ordinary alerts; enriched alerts may return two parts."""
+    locations = getattr(alert, "specific_locations", "") or ""
+    summary = getattr(alert, "warning_summary", "") or ""
+    if locations and summary:
+        when = _format_when(alert.onset, alert.ends, tz_name)
+        intro = f"{alert.event} for {locations}"
+        if when:
+            intro = f"{intro} {when}"
+        one_part = f"{PREFIX}{intro}: {summary}"
+        if _byte_len(one_part) <= max_bytes:
+            return [one_part]
+
+        p1_budget = max(0, max_bytes - _byte_len(_part_prefix(1, 2)))
+        p2_budget = max(0, max_bytes - _byte_len(_part_prefix(2, 2)))
+        p1_body = _truncate_words_bytes(intro, p1_budget)
+        p2_body = _truncate_words_bytes(summary, p2_budget)
+        return [_with_part_marker(1, 2, p1_body), _with_part_marker(2, 2, p2_body)]
+    if locations:
+        return [format_alert(alert.event, locations, alert.ends, tz_name, onset_iso=alert.onset, max_bytes=max_bytes)]
+    return [format_alert(alert.event, alert.area_desc, alert.ends, tz_name,
+                         onset_iso=alert.onset, sep="for", max_bytes=max_bytes)]
+
+
+def fmt_local(iso: str, tz_name: str = "Australia/Sydney") -> str:
     """Human-friendly local timestamp for the UI, e.g. "Jul 28, 1:40 AM".
     Falls back to the raw value if it cannot be parsed."""
     dt = _to_local(iso, tz_name)

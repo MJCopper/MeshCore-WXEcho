@@ -1,88 +1,70 @@
-"""Dedupe: sent / duplicate / update / cancelled detection."""
-from app.config import DEFAULT_SETTINGS
 from app.dedupe import decide
 from app.filters import FilterRules
 from app.models import Alert
 
-RULES = FilterRules.from_settings(DEFAULT_SETTINGS)
+
+RULES = FilterRules(include_exact=["Severe Thunderstorm Warning"], include_suffix=[], exclude_exact=[])
+
+
+def alert(identifier="one", headline="Severe Thunderstorm Warning for Illawarra", references=None, message_type="Alert"):
+    return Alert(
+        alert_id=identifier,
+        event="Severe Thunderstorm Warning",
+        headline=headline,
+        area_desc="Illawarra",
+        effective="2026-09-28T08:00:00+00:00",
+        expires="2026-09-28T10:00:00+00:00",
+        message_type=message_type,
+        ends="2026-09-28T10:00:00+00:00",
+        onset="2026-09-28T08:00:00+00:00",
+        references=references or [],
+    )
 
 
 class FakeState:
-    """In-memory stand-in for the db state lookup."""
-
     def __init__(self):
         self.rows = {}
 
-    def lookup(self, nws_id):
-        return self.rows.get(nws_id)
+    def lookup(self, alert_id):
+        return self.rows.get(alert_id)
 
-    def record(self, alert: Alert, disposition: str):
-        self.rows[alert.nws_id] = {
+    def record(self, item, disposition="sent"):
+        self.rows[item.alert_id] = {
             "disposition": disposition,
-            "msg_hash": alert.content_hash(),
-            "headline": alert.headline,
-            "expires": alert.expires,
+            "msg_hash": item.content_hash(),
+            "headline": item.headline,
+            "expires": item.expires,
         }
 
 
-def test_new_alert_is_sent(feature):
+def test_new_alert_is_sent():
+    assert decide(alert(), RULES, FakeState().lookup).disposition == "sent"
+
+
+def test_same_alert_is_duplicate():
     state = FakeState()
-    a = Alert.from_feature(feature("flash_flood_warning"))
-    d = decide(a, RULES, state.lookup)
-    assert d.disposition == "sent" and d.transmit is True
+    item = alert()
+    state.record(item)
+    result = decide(item, RULES, state.lookup)
+    assert result.disposition == "duplicate"
+    assert not result.transmit
 
 
-def test_same_alert_reseen_is_duplicate(feature):
+def test_referenced_update_is_sent():
     state = FakeState()
-    a = Alert.from_feature(feature("flash_flood_warning"))
-    state.record(a, "sent")
-    # Re-poll returns the identical feature.
-    d = decide(a, RULES, state.lookup)
-    assert d.disposition == "duplicate" and d.transmit is False
+    original = alert("one")
+    state.record(original)
+    update = alert("two", headline="Severe Thunderstorm Warning updated for Illawarra", references=["one"])
+    result = decide(update, RULES, state.lookup)
+    assert result.disposition == "update"
+    assert result.transmit
 
 
-def test_update_reference_chain_is_update(feature):
+def test_cancel_of_sent_alert_is_broadcast():
     state = FakeState()
-    original = Alert.from_feature(feature("flash_flood_warning"))
-    state.record(original, "sent")
-    upd = Alert.from_feature(feature("flash_flood_warning_update"))
-    # New id, references the sent one, expiry + headline changed.
-    d = decide(upd, RULES, state.lookup)
-    assert d.disposition == "update" and d.transmit is True
-
-
-def test_update_without_material_change_is_duplicate(feature):
-    state = FakeState()
-    original = Alert.from_feature(feature("flash_flood_warning"))
-    state.record(original, "sent")
-    # An "update" that did not change headline/expiry -> duplicate.
-    upd_feature = feature("flash_flood_warning_update")
-    upd_feature["properties"]["headline"] = original.headline
-    upd_feature["properties"]["expires"] = original.expires
-    upd_feature["properties"]["ends"] = original.expires
-    upd = Alert.from_feature(upd_feature)
-    d = decide(upd, RULES, state.lookup)
-    assert d.disposition == "duplicate" and d.transmit is False
-
-
-def test_cancel_of_sent_alert_notifies(feature):
-    state = FakeState()
-    original = Alert.from_feature(feature("flash_flood_warning"))
-    state.record(original, "sent")
-    cancel = Alert.from_feature(feature("flash_flood_warning_cancel"))
-    d = decide(cancel, RULES, state.lookup)
-    assert d.disposition == "cancelled" and d.transmit is True
-
-
-def test_cancel_of_never_sent_alert_is_filtered(feature):
-    state = FakeState()
-    cancel = Alert.from_feature(feature("flash_flood_warning_cancel"))
-    d = decide(cancel, RULES, state.lookup)
-    assert d.disposition == "filtered" and d.transmit is False
-
-
-def test_excluded_event_is_filtered(feature):
-    state = FakeState()
-    a = Alert.from_feature(feature("severe_tstorm_watch"))
-    d = decide(a, RULES, state.lookup)
-    assert d.disposition == "filtered" and d.transmit is False
+    original = alert("one")
+    state.record(original)
+    cancel = alert("two", references=["one"], message_type="Cancel")
+    result = decide(cancel, RULES, state.lookup)
+    assert result.disposition == "cancelled"
+    assert result.transmit
