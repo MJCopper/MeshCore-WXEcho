@@ -115,7 +115,12 @@ class BomPoller:
                     datetime.now(timezone.utc) - server_dt).total_seconds()
             except Exception:
                 pass
-        self.status.last_poll_result = f"ok: {len(items)} active BOM warning(s)"
+        if client.last_errors:
+            detail = "; ".join(client.last_errors)
+            self.status.last_poll_result = f"partial: {len(items)} active BOM warning(s); {detail}"
+            self._db.add_error("bom", "partial poll: %s" % detail)
+        else:
+            self.status.last_poll_result = f"ok: {len(items)} active BOM warning(s)"
 
         self._db.purge_expired_state()
         self._db.prune_history()
@@ -145,20 +150,26 @@ class BomPoller:
         parts.append(FINAL_VERIFICATION_MESSAGE)
         logged_text = " || ".join(parts)
 
-        if not self._db.history_exists(alert.alert_id):
+        history_exists = self._db.history_exists(alert.alert_id)
+        if not history_exists:
             detail = decision.detail
             history_text = logged_text if decision.transmit else ""
+            transmit_status = "queued" if decision.transmit else None
             if decision.transmit and dry_run:
                 detail = f"DRY-RUN: {decision.detail}"
+                transmit_status = "dry-run"
             self._db.add_history(alert.alert_id, alert.event, alert.area_desc,
-                                 decision.disposition, history_text, detail)
+                                 decision.disposition, history_text, detail,
+                                 transmit_status=transmit_status)
+        elif decision.transmit and not dry_run:
+            self._db.update_history_transmit_status(
+                alert.alert_id, "queued", decision.detail)
 
         if not decision.transmit:
             return
         if dry_run:
             for part in parts:
                 self._db.add_event("INFO", f"[DRY-RUN] would send: {part}")
-            self._record_state(alert, decision)
             return
 
         fail_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -173,8 +184,13 @@ class BomPoller:
             if aggregate["remaining"] > 0:
                 return
             if aggregate["all_ok"]:
+                self._db.update_history_transmit_status(a.alert_id, "success")
                 self._record_state(a, d)
                 return
+            self._db.update_history_transmit_status(
+                a.alert_id, "failed",
+                "%s; broadcast failed: %s" % (d.detail, aggregate["first_err"]),
+            )
             self.status.last_broadcast_failure = ts
             self.status.last_broadcast_failure_text = t
             self._db.add_error("broadcast", f"NOT SENT on MeshCore (will retry): {aggregate['first_err']} :: {t}")

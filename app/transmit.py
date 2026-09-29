@@ -266,7 +266,6 @@ class Transport:
     channel: int
     target: str                   # serial path or host - display + "configured?" check
     make: object                  # callable() -> Transmitter
-    repeat: int = 1               # send each alert this many times (LoRa has no ACK)
     test_channel: int = 1         # channel used for Troubleshoot tests only
     tx: Transmitter | None = None
     connected: bool = False
@@ -290,9 +289,6 @@ def _build_transports(db) -> dict:
         except (TypeError, ValueError):
             return d
 
-    def rep(k):
-        return max(1, min(5, num(k, 2)))
-
     mc_conn = g("meshcore_conn", "serial") or "serial"
     mc = Transport(
         name="meshcore", label="MeshCore",
@@ -300,7 +296,7 @@ def _build_transports(db) -> dict:
         conn=mc_conn, channel=num("meshcore_channel", 0),
         target=(g("meshcore_host", "") if mc_conn == "tcp" else g("meshcore_port", "")) or "",
         make=lambda: MeshCoreTransmitter(mc_conn, g("meshcore_port", "") or "", g("meshcore_host", "") or ""),
-        repeat=rep("meshcore_repeat"), test_channel=num("meshcore_test_channel", 1),
+        test_channel=num("meshcore_test_channel", 1),
     )
     return {"meshcore": mc}
 
@@ -400,7 +396,7 @@ class TransmitManager:
         return [
             {"name": t.name, "label": t.label, "enabled": t.enabled,
              "conn": t.conn, "connected": t.connected and t.tx is not None and t.tx.connected,
-             "channel": t.channel, "error": t.error}
+             "target": t.target, "channel": t.channel, "error": t.error}
             for t in self._transports.values()
         ]
 

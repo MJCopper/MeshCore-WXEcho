@@ -1,6 +1,7 @@
 """Bureau of Meteorology warning RSS client."""
 from __future__ import annotations
 
+import asyncio
 import re
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
@@ -95,6 +96,7 @@ class BOMClient:
         self.contact = contact
         self.timeout = timeout
         self.last_server_date: str | None = None
+        self.last_errors: list[str] = []
 
     async def fetch_active(self, regions: list[str] | str,
                            districts: list[str] | None = None) -> tuple[list[dict], str]:
@@ -113,16 +115,32 @@ class BOMClient:
         }
         alerts: list[dict] = []
         raw_parts: list[str] = []
+        self.last_errors = []
         async with httpx.AsyncClient(timeout=self.timeout, headers=headers) as client:
-            for state in sorted(states):
+            async def fetch_state(state: str):
                 url = urljoin(BOM_BASE_URL, BOM_FEEDS[state])
                 try:
                     response = await client.get(url)
                     response.raise_for_status()
                 except httpx.HTTPError as exc:
-                    raise BOMError("BOM feed failed for %s: %s" % (state, exc)) from exc
+                    return state, url, None, str(exc)
+                return state, url, response, ""
+
+            results = await asyncio.gather(*(fetch_state(state) for state in sorted(states)))
+            for state, url, response, error in results:
+                if error:
+                    self.last_errors.append("%s: %s" % (state, error))
+                    continue
                 raw = response.text
+                try:
+                    parsed = parse_rss(raw, url, districts=districts)
+                except BOMError as exc:
+                    self.last_errors.append("%s: %s" % (state, exc))
+                    continue
                 raw_parts.append(raw)
+                alerts.extend(parsed)
                 self.last_server_date = response.headers.get("date") or self.last_server_date
-                alerts.extend(parse_rss(raw, url, districts=districts))
+        if not raw_parts:
+            detail = "; ".join(self.last_errors) or "no feed responses"
+            raise BOMError("all selected BOM feeds failed: %s" % detail)
         return alerts, "\n\n".join(raw_parts)

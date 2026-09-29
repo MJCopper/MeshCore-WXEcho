@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import pytest
+import httpx
+import respx
 
-from app.bom import BOM_BASE_URL, BOMError, parse_rss
+from app.bom import BOM_BASE_URL, BOM_FEEDS, BOMClient, BOMError, parse_rss
 from app.models import Alert
 
 
@@ -38,27 +40,57 @@ def test_bom_district_filter_and_cancellation():
 
 
 def test_parse_timestamped_marine_warning_summary():
-        raw = """<rss><channel>
-            <item>
-                <title>29/16:05 EST Marine Wind Warning Summary for New South Wales</title>
-                <guid>marine-current</guid>
-            </item>
-            <item>
-                <title>29/16:10 EST Cancellation of Marine Wind Warning Summary for South Australia</title>
-                <guid>marine-cancelled</guid>
-            </item>
-        </channel></rss>"""
+    raw = """<rss><channel>
+        <item>
+            <title>29/16:05 EST Marine Wind Warning Summary for New South Wales</title>
+            <guid>marine-current</guid>
+        </item>
+        <item>
+            <title>29/16:10 EST Cancellation of Marine Wind Warning Summary for South Australia</title>
+            <guid>marine-cancelled</guid>
+        </item>
+    </channel></rss>"""
 
-        current, cancelled = parse_rss(raw)
+    current, cancelled = parse_rss(raw)
 
-        assert current["event"] == "Marine Wind Warning"
-        assert current["area_desc"] == "New South Wales"
-        assert current["message_type"] == "Alert"
-        assert cancelled["event"] == "Marine Wind Warning"
-        assert cancelled["area_desc"] == "South Australia"
-        assert cancelled["message_type"] == "Cancel"
+    assert current["event"] == "Marine Wind Warning"
+    assert current["area_desc"] == "New South Wales"
+    assert current["message_type"] == "Alert"
+    assert cancelled["event"] == "Marine Wind Warning"
+    assert cancelled["area_desc"] == "South Australia"
+    assert cancelled["message_type"] == "Cancel"
 
 
 def test_invalid_bom_xml_raises():
     with pytest.raises(BOMError):
         parse_rss("<not-rss>")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_keeps_successful_regions_when_one_feed_fails():
+    respx.get(BOM_BASE_URL + BOM_FEEDS["NSW"]).mock(
+        return_value=httpx.Response(200, text=FIXTURE.read_text())
+    )
+    respx.get(BOM_BASE_URL + BOM_FEEDS["VIC"]).mock(
+        return_value=httpx.Response(503, text="unavailable")
+    )
+    client = BOMClient()
+
+    alerts, raw = await client.fetch_active(["NSW", "VIC"])
+
+    assert len(alerts) == 2
+    assert "Severe Thunderstorm Warning" in raw
+    assert len(client.last_errors) == 1
+    assert client.last_errors[0].startswith("VIC: Server error '503 Service Unavailable'")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_raises_when_all_selected_regions_fail():
+    respx.get(BOM_BASE_URL + BOM_FEEDS["NSW"]).mock(
+        return_value=httpx.Response(503, text="unavailable")
+    )
+
+    with pytest.raises(BOMError, match="all selected BOM feeds failed"):
+        await BOMClient().fetch_active(["NSW"])

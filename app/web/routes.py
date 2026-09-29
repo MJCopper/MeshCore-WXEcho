@@ -42,6 +42,13 @@ DISP_LABELS = {
     "duplicate": "duplicate",
 }
 
+TX_STATUS_LABELS = {
+    "queued": "queued",
+    "success": "delivered",
+    "failed": "failed",
+    "dry-run": "dry-run",
+}
+
 
 def render(request: Request, name: str, **ctx):
     try:
@@ -51,7 +58,7 @@ def render(request: Request, name: str, **ctx):
     return TEMPLATES.TemplateResponse(
         request, name,
         {"max_bytes": MAX_PAYLOAD_BYTES, "tz": tz, "disp_label": DISP_LABELS,
-         "version": __version__, **ctx},
+         "tx_label": TX_STATUS_LABELS, "version": __version__, **ctx},
     )
 
 
@@ -117,7 +124,7 @@ def _dash_ctx(request) -> dict:
         except Exception:
             return 999
     rows = db.query_history(limit=1000)
-    sent = [r for r in rows if r["disposition"] in ("sent", "update", "cancelled")]
+    sent = [r for r in rows if r["transmit_status"] == "success"]
     sent_7d = sum(1 for r in sent if _age(r["ts"]) < 7)
     sent_today = sum(1 for r in sent if _age(r["ts"]) < 1)
     buckets = [0] * 7
@@ -131,7 +138,8 @@ def _dash_ctx(request) -> dict:
         include = ["All Warnings"] + include
     recent = [{
         "event": r["event"], "area": r["area"], "disposition": r["disposition"],
-        "detail": r["detail"], "text": r["transmitted_text"], "when": fmt_local(r["ts"], tz),
+        "transmit_status": r["transmit_status"], "detail": r["detail"],
+        "text": r["transmitted_text"], "when": fmt_local(r["ts"], tz),
     } for r in db.query_history(limit=6)]
     ltx = db.query_transmit_log(limit=1)
     last_tx = "-"
@@ -160,6 +168,8 @@ def _dash_ctx(request) -> dict:
             "Not reaching BOM: last good poll %d min ago. Not receiving alerts." % (succ_age // 60)))
     if st.last_poll_result.startswith("error"):
         problems.append(("warn", "Last BOM poll errored: %s" % st.last_poll_result[7:][:80]))
+    elif st.last_poll_result.startswith("partial"):
+        problems.append(("warn", "Some BOM feeds failed: %s" % st.last_poll_result[9:][:80]))
     # 2. Radios: any enabled radio offline means alerts may not go out.
     radios = tx.status()
     on = [r for r in radios if r["enabled"]]
@@ -194,8 +204,9 @@ def _dash_ctx(request) -> dict:
         "health_paused": dry,
         "dry_run": bool(db.get_setting("dry_run", True)),
         "connected": tx.connected, "device": device, "tx_error": tx.last_error,
-        "channel_index": int(db.get_setting("channel_index", 0)),
-        "zone_count": len(zones), "forecast_count": len(regions), "county_count": len(zones),
+        "channel_index": int(db.get_setting("meshcore_channel", 0)),
+        "state_count": len(regions), "district_count": len(zones),
+        "all_districts": not zones,
         "poll_interval": int(db.get_setting("poll_interval", 120)), "queue_depth": tx.queue_depth,
         "last_poll_local": fmt_local(poller.status.last_poll_time, tz) if poller.status.last_poll_time else "-",
         "uptime_str": uptime_str, "sent_7d": sent_7d, "sent_today": sent_today,
@@ -241,26 +252,29 @@ async def toggle_dry_run(request: Request):
 
 # ---- history -----------------------------------------------------------
 @router.get("/history", response_class=HTMLResponse)
-async def history(request: Request, disposition: str = "", date_from: str = "",
-                  date_to: str = ""):
+async def history(request: Request, disposition: str = "", transmit_status: str = "",
+                  date_from: str = "", date_to: str = ""):
     rows = _db(request).query_history(
         disposition=disposition or None,
+        transmit_status=transmit_status or None,
         date_from=date_from or None,
         date_to=date_to or None,
     )
     return render(
         request, "history.html", rows=rows, disposition=disposition,
-        date_from=date_from, date_to=date_to,
-        dispositions=["sent", "filtered", "duplicate", "update", "cancelled"],
+        transmit_status=transmit_status, date_from=date_from, date_to=date_to,
+        dispositions=["sent", "filtered", "update", "cancelled"],
+        transmit_statuses=["queued", "success", "failed", "dry-run"],
     )
 
 
 @router.get("/partials/history", response_class=HTMLResponse)
-async def history_partial(request: Request, disposition: str = "", date_from: str = "",
-                          date_to: str = ""):
+async def history_partial(request: Request, disposition: str = "", transmit_status: str = "",
+                          date_from: str = "", date_to: str = ""):
     # Just the rows, honoring the same filters, for live polling.
     rows = _db(request).query_history(
         disposition=disposition or None,
+        transmit_status=transmit_status or None,
         date_from=date_from or None,
         date_to=date_to or None,
     )
@@ -358,9 +372,6 @@ async def save_settings(
     display_timezone: str = Form("Australia/Sydney"),
     bom_regions: list[str] = Form(default=[]),
     bom_districts: str = Form(""),
-    state: str = Form(""),
-    counties: list[str] = Form(default=[]),
-    extra_zones: str = Form(""),
     events: list[str] = Form(default=[]),
     all_warnings: str = Form(""),
     meshcore_enabled: str = Form(""),
@@ -544,9 +555,17 @@ async def manual_send(request: Request, text: str = Form(...)):
 # ---- troubleshoot ------------------------------------------------------
 @router.get("/troubleshoot", response_class=HTMLResponse)
 async def troubleshoot(request: Request):
+    db = _db(request)
+    db_path = db.path
+    db_size = 0
+    if db_path != ":memory:":
+        try:
+            db_size = Path(db_path).stat().st_size
+        except OSError:
+            pass
     return render(request, "troubleshoot.html",
-                  errors=_db(request).recent_errors(),
-                  transports=_tx(request).status())
+                  errors=db.recent_errors(), transports=_tx(request).status(),
+                  db_path=db_path, db_size=db_size)
 
 
 @router.post("/troubleshoot/clear-errors", response_class=HTMLResponse)

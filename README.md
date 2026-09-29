@@ -22,7 +22,21 @@ MeshCore BOM Weather polls official Australian Bureau of Meteorology warning RSS
 docker compose up -d
 ```
 
-Open `http://<host>:8000` and configure the BOM regions and MeshCore connection in Settings. The compose file mounts `/data` for the SQLite database and `/dev` for USB serial access.
+Open `http://<host>:8110` and configure the BOM regions and MeshCore connection in Settings. The compose file bind-mounts the repository's `data/` directory at `/data` for the SQLite database and mounts `/dev` for USB serial access.
+
+### Data persistence and backup
+
+Docker stores settings, BOM history, alert state, events and the transmit log in `data/wx-echo.db` on the host. `docker compose restart`, `stop`, `up` and container recreation retain this file. Keep the `data/` directory when moving or reinstalling WXEcho; a different checkout has a different `data/` directory.
+
+For a consistent backup, stop the service before copying the database:
+
+```bash
+docker compose stop
+cp data/wx-echo.db data/wx-echo.db.backup
+docker compose start
+```
+
+The active database path and file size are shown on the Troubleshoot page. Native installations store the database in their installation's `data/` directory when run by the supplied systemd service.
 
 ### Native Linux
 

@@ -16,9 +16,10 @@ class _FakeDb:
         return None
 
     def history_exists(self, alert_id):
-        return False
+        return any(row["alert_id"] == alert_id for row in self.history_rows)
 
-    def add_history(self, alert_id, event, area, disposition, transmitted_text="", detail=""):
+    def add_history(self, alert_id, event, area, disposition, transmitted_text="", detail="",
+                    transmit_status=None):
         self.history_rows.append(
             {
                 "alert_id": alert_id,
@@ -27,8 +28,17 @@ class _FakeDb:
                 "disposition": disposition,
                 "transmitted_text": transmitted_text,
                 "detail": detail,
+                "transmit_status": transmit_status,
             }
         )
+
+    def update_history_transmit_status(self, alert_id, transmit_status, detail=None):
+        for row in self.history_rows:
+            if row["alert_id"] == alert_id:
+                row["transmit_status"] = transmit_status
+                if detail is not None:
+                    row["detail"] = detail
+                return
 
     def add_event(self, level, message):
         self.events.append((level, message))
@@ -133,6 +143,7 @@ async def test_poller_records_state_only_after_all_multipart_parts_succeed(monke
 
     assert len(tx.enqueued) == 3
     assert db.state_rows == []
+    assert db.history_rows[0]["transmit_status"] == "queued"
 
     tx.enqueued[0]["on_result"](True, "")
     assert db.state_rows == []
@@ -142,6 +153,7 @@ async def test_poller_records_state_only_after_all_multipart_parts_succeed(monke
 
     tx.enqueued[2]["on_result"](True, "")
     assert len(db.state_rows) == 1
+    assert db.history_rows[0]["transmit_status"] == "success"
 
 
 @pytest.mark.asyncio
@@ -163,6 +175,8 @@ async def test_poller_does_not_record_state_when_any_multipart_part_fails(monkey
     tx.enqueued[2]["on_result"](False, "link down")
 
     assert db.state_rows == []
+    assert db.history_rows[0]["transmit_status"] == "failed"
+    assert "broadcast failed: link down" in db.history_rows[0]["detail"]
     assert poller.status.last_broadcast_failure is not None
     assert "NOT SENT on MeshCore" in db.errors[-1][1]
     assert FINAL_VERIFICATION_MESSAGE in db.errors[-1][1]
@@ -189,3 +203,23 @@ async def test_poller_dry_run_logs_history_and_events_with_final_verification(mo
         f"1/2 first || 2/2 second || {FINAL_VERIFICATION_MESSAGE}"
     )
     assert db.history_rows[0]["detail"].startswith("DRY-RUN:")
+    assert db.history_rows[0]["transmit_status"] == "dry-run"
+    assert db.state_rows == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_alert_is_queued_when_broadcasting_goes_live(monkeypatch):
+    db = _FakeDb()
+    tx = _FakeTx()
+    poller = BomPoller(db, tx)
+    rules = FilterRules(include_exact=[], include_suffix=["Warning"], exclude_exact=[])
+    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz: ["warning"])
+    item = _warning_item("dry-to-live")
+
+    await poller._process(item, rules, "Australia/Sydney", 0, dry_run=True)
+    await poller._process(item, rules, "Australia/Sydney", 0, dry_run=False)
+
+    assert len(db.history_rows) == 1
+    assert db.history_rows[0]["transmit_status"] == "queued"
+    assert db.history_rows[0]["detail"] == "new alert"
+    assert len(tx.enqueued) == 2

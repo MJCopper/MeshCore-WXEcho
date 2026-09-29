@@ -13,17 +13,26 @@
         {% endfor %}
       </select>
     </div>
-    <div><label>From (ISO)</label>
-      <input name="date_from" value="{{ date_from }}" placeholder="2026-07-23"></div>
-    <div><label>To (ISO)</label>
-      <input name="date_to" value="{{ date_to }}" placeholder="2026-07-24"></div>
+    <div>
+      <label>MeshCore delivery</label>
+      <select name="transmit_status">
+        <option value="">all</option>
+        {% for status in transmit_statuses %}
+        <option value="{{ status }}" {% if status == transmit_status %}selected{% endif %}>{{ tx_label.get(status, status) }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div><label>From</label>
+      <input type="date" name="date_from" value="{{ date_from }}"></div>
+    <div><label>To</label>
+      <input type="date" name="date_to" value="{{ date_to }}"></div>
     <div style="display:flex;align-items:flex-end;">
       <button type="submit">Filter</button></div>
   </form>
 </div>
 <div class="panel" style="padding:0;" id="history-rows"
      hx-get="/partials/history" hx-trigger="every 15s" hx-swap="innerHTML"
-     hx-include="[name='disposition'],[name='date_from'],[name='date_to']">
+    hx-include="[name='disposition'],[name='transmit_status'],[name='date_from'],[name='date_to']">
   {% include "_history_rows.html" %}
 </div>
 {% endblock %}

@@ -1,11 +1,9 @@
 """Format BOM alerts into MeshCore text payloads (<= 195 bytes).
 
-Multi-area alerts are summarised as "<home area> and surrounding areas",
-anchored on the configured home area when it is one of the alert's counties
-(otherwise the first listed county). Times are local (tz abbrev dropped -- the
-mesh is regional). Upcoming alerts (onset in the future) show a start->end
-window; in-effect alerts show only "until <end>". The payload is byte-capped
-in UTF-8, area trimmed first.
+Multi-area alerts are summarised using the first BOM area followed by
+"and surrounding areas". Times are local (tz abbreviation dropped because the
+mesh is regional). Upcoming alerts show a start-to-end window; in-effect alerts
+show only "until <end>". The payload is byte-capped in UTF-8, area trimmed first.
 """
 from __future__ import annotations
 
@@ -15,7 +13,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .config import MAX_PAYLOAD_BYTES
 
 PREFIX = ""
-DEFAULT_HOME_AREA = "Columbia"
 
 
 def _to_local(iso: str, tz_name: str):
@@ -69,7 +66,7 @@ def _format_when(onset_iso: str, ends_iso: str, tz_name: str) -> str:
     return ""
 
 
-def _area_string(area_desc: str, home_area: str = DEFAULT_HOME_AREA) -> str:
+def _area_string(area_desc: str, home_area: str = "") -> str:
     areas = [a.strip() for a in area_desc.split(";") if a.strip()]
     if not areas:
         return ""
@@ -114,7 +111,7 @@ def format_alert(
     ends_iso: str,
     tz_name: str = "Australia/Sydney",
     onset_iso: str = "",
-    home_area: str = DEFAULT_HOME_AREA,
+    home_area: str = "",
     sep: str = "for",
     max_bytes: int = MAX_PAYLOAD_BYTES,
 ) -> str:

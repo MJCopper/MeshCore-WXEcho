@@ -2,12 +2,15 @@
 <div class="rec">
   <div class="rec-head">
     <span class="rec-time">{{ r["ts"] | localtime(tz) }}</span>
-    <span class="pill {{ r['disposition'] }}">{{ disp_label.get(r["disposition"], r["disposition"]) }}</span>
+    <span>
+      <span class="pill {{ r['disposition'] }}">{{ disp_label.get(r["disposition"], r["disposition"]) }}</span>
+      {% if r["transmit_status"] %}<span class="pill {{ r['transmit_status'] }}">{{ tx_label.get(r["transmit_status"], r["transmit_status"]) }}</span>{% endif %}
+    </span>
   </div>
   <div class="rec-event">{{ r["event"] }}</div>
   <div class="rec-msgrow">
     <div class="rec-msgwrap">
-      <div class="rec-lbl">TX Message</div>
+      <div class="rec-lbl">Prepared message</div>
       {% if r["transmitted_text"] %}
       <div class="rec-msg">{{ r["transmitted_text"] }}</div>
       {% else %}

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS history (
     event            TEXT,
     area             TEXT,
     disposition      TEXT,
+    transmit_status  TEXT,
     transmitted_text TEXT,
     detail           TEXT
 );
@@ -87,6 +88,7 @@ class Database:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         # A write that hits a lock should WAIT (up to 5s) for it to clear rather
         # than fail instantly with "database is locked".
@@ -98,6 +100,20 @@ class Database:
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.executescript(SCHEMA)
+            history_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(history)")
+            }
+            if "transmit_status" not in history_columns:
+                self._conn.execute("ALTER TABLE history ADD COLUMN transmit_status TEXT")
+            transmit_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(transmit_log)")
+            }
+            if "transport" not in transmit_columns:
+                self._conn.execute("ALTER TABLE transmit_log ADD COLUMN transport TEXT")
+            self._conn.execute(
+                "DELETE FROM alert_state WHERE alert_id IN "
+                "(SELECT alert_id FROM history WHERE transmit_status = 'dry-run')"
+            )
             self._conn.commit()
 
     def _seed_settings(self) -> None:
@@ -201,14 +217,32 @@ class Database:
         disposition: str,
         transmitted_text: str = "",
         detail: str = "",
+        transmit_status: Optional[str] = None,
     ) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO history(ts, alert_id, event, area, disposition, "
-                "transmitted_text, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "transmit_status, transmitted_text, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (_now(), alert_id, event, area, disposition,
-                 transmitted_text, detail),
+                 transmit_status, transmitted_text, detail),
             )
+            self._conn.commit()
+
+    def update_history_transmit_status(
+        self, alert_id: str, transmit_status: str, detail: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            if detail is None:
+                self._conn.execute(
+                    "UPDATE history SET transmit_status = ? WHERE alert_id = ?",
+                    (transmit_status, alert_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE history SET transmit_status = ?, detail = ? WHERE alert_id = ?",
+                    (transmit_status, detail, alert_id),
+                )
             self._conn.commit()
 
     def history_exists(self, alert_id: str, disposition: Optional[str] = None) -> bool:
@@ -244,6 +278,7 @@ class Database:
     def query_history(
         self,
         disposition: Optional[str] = None,
+        transmit_status: Optional[str] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         limit: int = 200,
@@ -252,12 +287,24 @@ class Database:
         if disposition:
             clauses.append("disposition = ?")
             params.append(disposition)
+        if transmit_status:
+            clauses.append("transmit_status = ?")
+            params.append(transmit_status)
         if date_from:
             clauses.append("ts >= ?")
             params.append(date_from)
         if date_to:
-            clauses.append("ts <= ?")
-            params.append(date_to)
+            if "T" not in date_to:
+                try:
+                    next_day = datetime.fromisoformat(date_to) + timedelta(days=1)
+                    clauses.append("ts < ?")
+                    params.append(next_day.isoformat())
+                except ValueError:
+                    clauses.append("ts <= ?")
+                    params.append(date_to)
+            else:
+                clauses.append("ts <= ?")
+                params.append(date_to)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         with self._lock:
@@ -340,4 +387,7 @@ class Database:
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(RESTART)")
+            finally:
+                self._conn.close()

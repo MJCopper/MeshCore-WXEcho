@@ -115,10 +115,7 @@ def load_bootstrap() -> BootstrapConfig:
             db_path = str(new_db)
     # Make sure the parent directory exists so SQLite can create the file.
     parent = Path(db_path).expanduser().parent
-    try:
-        parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    parent.mkdir(parents=True, exist_ok=True)
     return BootstrapConfig(
         http_host=_env_with_legacy("WX_ECHO_HOST", "0.0.0.0") or "0.0.0.0",
         http_port=int(_env_with_legacy("WX_ECHO_PORT", "8000") or "8000"),
@@ -138,7 +135,6 @@ DEFAULT_SETTINGS: dict = {
     "meshcore_port": "",
     "meshcore_host": "",
     "meshcore_channel": 0,
-    "meshcore_repeat": 2,
     "meshcore_test_channel": 1,
     "dry_run": True,
     "test_channel": 1,

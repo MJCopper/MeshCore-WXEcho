@@ -159,6 +159,10 @@
     .pill.update{background:rgba(75,99,230,.13);color:var(--accent);}
     .pill.filtered,.pill.duplicate{background:rgba(120,132,156,.15);color:#5c6678;}
     .pill.cancelled{background:rgba(245,165,36,.16);color:#a9720a;}
+    .pill.queued{background:rgba(245,165,36,.16);color:#a9720a;}
+    .pill.success{background:rgba(35,194,107,.14);color:#12924c;}
+    .pill.failed{background:rgba(239,75,75,.14);color:#c62f2f;}
+    .pill.dry-run{background:rgba(120,132,156,.15);color:#5c6678;}
     .kv{display:flex;justify-content:space-between;padding:11px 20px;border-bottom:1px solid var(--line);font-size:14px;}
     .kv:last-child{border-bottom:none;}
     .kv .k{color:var(--muted);} .kv .v{font-weight:650;} .kv .v.ok{color:var(--good);}
@@ -181,7 +185,7 @@
     .rec-areawrap{margin-top:11px;}
     .rec-area{color:#5c6678;font-size:12.5px;overflow-wrap:anywhere;}
 
-    /* settings pickers (county + event checkboxes) */
+    /* settings checkbox groups */
     .checkgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:7px 16px;
       border:1px solid var(--line);border-radius:10px;padding:13px 15px;background:#fff;}
     .checkgrid.scroll{max-height:300px;overflow:auto;}
