@@ -123,13 +123,18 @@ def load_bootstrap() -> BootstrapConfig:
     )
 
 
-# Default settings seeded into the db on first run. Every one of these is
-# editable in the UI afterwards; env vars never override stored settings.
+# Default settings seeded into the db on first run. Environment variables do
+# not override stored settings.
+# Use one browser-style User-Agent for all BOM requests.
+BOM_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux aarch64; rv:140.0) "
+    "Gecko/20100101 Firefox/140.0"
+)
+
 DEFAULT_SETTINGS: dict = {
     "bom_regions": ["NSW"],
     "bom_districts": [],
     "poll_interval": 120,
-    "bom_contact": "MeshCore BOM Weather (change-me@example.com)",
     "meshcore_enabled": True,
     "meshcore_conn": "serial",
     "meshcore_port": "",

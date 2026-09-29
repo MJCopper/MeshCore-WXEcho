@@ -5,6 +5,7 @@ import pytest
 import respx
 
 from app.bom_enricher import BOMEnrichment, BOMWarningEnricher, parse_warning_api, parse_warning_page
+from app.config import BOM_USER_AGENT
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bom_warning_IDW21033.html"
@@ -45,6 +46,7 @@ async def test_enricher_caches_successful_api_detail():
         second = await enricher.enrich(URL)
     assert first == second
     assert route.call_count == 1
+    assert route.calls.last.request.headers["user-agent"] == BOM_USER_AGENT
 
 
 @pytest.mark.asyncio

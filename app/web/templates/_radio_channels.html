@@ -2,44 +2,31 @@
 {% set channel_indexes = channels | map(attribute='index') | list if has_channels else [] %}
 
 {% if model or connected %}
-<p class="hint">
-  {% if model %}Detected radio: {{ model }}{% else %}Connected radio detected{% endif %}
-</p>
+<p class="hint">{% if model %}Detected radio: {{ model }}{% else %}Connected radio detected{% endif %}</p>
 {% endif %}
-
-{% if error %}
-<p class="hint" style="color:#b42318;">{{ error }}</p>
-{% endif %}
+{% if error %}<p class="hint" style="color:#b42318;">{{ error }}</p>{% endif %}
 
 <div class="row" style="margin-top:12px;">
   <div>
     <label>Live channel</label>
-    {% if has_channels %}
     <select name="{{ live_field }}">
       {% for ch in channels %}
       <option value="{{ ch.index }}" {% if (ch.index | int) == (live_val | int) %}selected{% endif %}>{{ ch.index }} - {{ ch.name }}</option>
       {% endfor %}
       {% if (live_val | int) not in channel_indexes %}
-      <option value="{{ live_val }}" selected>{{ live_val }} - current</option>
+      <option value="{{ live_val }}" selected>{{ live_val }} - current{% if not has_channels %} (names unavailable){% endif %}</option>
       {% endif %}
     </select>
-    {% else %}
-    <input name="{{ live_field }}" type="number" min="0" value="{{ live_val }}">
-    {% endif %}
   </div>
   <div>
     <label>Test channel</label>
-    {% if has_channels %}
     <select name="{{ test_field }}">
       {% for ch in channels %}
       <option value="{{ ch.index }}" {% if (ch.index | int) == (test_val | int) %}selected{% endif %}>{{ ch.index }} - {{ ch.name }}</option>
       {% endfor %}
       {% if (test_val | int) not in channel_indexes %}
-      <option value="{{ test_val }}" selected>{{ test_val }} - current</option>
+      <option value="{{ test_val }}" selected>{{ test_val }} - current{% if not has_channels %} (names unavailable){% endif %}</option>
       {% endif %}
     </select>
-    {% else %}
-    <input name="{{ test_field }}" type="number" min="0" value="{{ test_val }}">
-    {% endif %}
   </div>
 </div>

@@ -63,6 +63,6 @@
       {% set nconn = active | selectattr('connected') | list | length %}
       {% set nen = active | length %}
       <div class="big" style="color:{{ 'var(--good)' if nen and nconn == nen else ('var(--bad)' if nen else 'var(--muted)') }};">{{ nconn }}<span class="unit"> / {{ nen }}</span></div>
-      <div class="s2">{% if not nen %}none enabled{% elif nconn == nen %}all online{% else %}{{ nen - nconn }} offline{% endif %}</div></div>
+      <div class="s2">{% if not nen %}no radio configured{% elif nconn == nen %}all online{% else %}{{ nen - nconn }} offline{% endif %}</div></div>
   </section>
 </div>

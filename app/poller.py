@@ -89,9 +89,7 @@ class BomPoller:
     async def poll_once(self) -> None:
         settings = self._db.all_settings()
         regions = settings.get("bom_regions", ["NSW"])
-        contact = settings.get("bom_contact", "")
-        self._enricher.contact = contact
-        client = BOMClient(contact=contact)
+        client = BOMClient()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             items, raw = await client.fetch_active(

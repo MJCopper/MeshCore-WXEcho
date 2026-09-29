@@ -65,7 +65,7 @@ The default broadcast policy includes all BOM warning products. Settings can ins
 1. Open Settings.
 2. Select the BOM state or territory feeds to monitor.
 3. Optionally enter forecast district names.
-4. Configure MeshCore as USB serial or TCP and select the live/test channels. For USB, click Auto-detect USB and select a companion radio from the detected-device dropdown; Linux selections prefer a stable `/dev/serial/by-id/` path. A serial path can still be entered manually when detection is unavailable. Click Save settings to persist the selected port.
+4. Configure MeshCore as USB serial or TCP. For USB, choose a path from the always-visible device list; Auto-detect USB refreshes every entry in `/dev/serial/by-id/` without probing it. A serial path can also be entered manually. Live and test channel names load automatically from the chosen companion, and their selected indexes are retained when the radio is offline. Click Save settings to persist the port and channels.
 5. Leave dry-run enabled while checking the dashboard and history.
 6. Send a manual test before enabling live broadcasts.
 

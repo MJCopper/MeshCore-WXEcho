@@ -29,40 +29,31 @@
 
   <div class="panel">
     <h3>MeshCore radio</h3>
-    <label class="chk"><input type="checkbox" name="meshcore_enabled" {% if mc_enabled %}checked{% endif %}> <b>Enable MeshCore</b></label>
     <div class="row" style="margin-top:12px;">
       <div><label>Connection</label><select name="meshcore_conn"><option value="serial" {% if mc_conn == 'serial' %}selected{% endif %}>USB (serial)</option><option value="tcp" {% if mc_conn == 'tcp' %}selected{% endif %}>Network (IP / TCP)</option></select></div>
-      <div>
-        <button
-          type="button"
-          class="secondary"
-          hx-post="/settings/channels/meshcore"
-          hx-target="#meshcore-channel-fields"
-          hx-swap="innerHTML"
-          hx-include="[name='meshcore_conn'],[name='meshcore_port'],[name='meshcore_host']"
-        >Load channels</button>
-      </div>
     </div>
 
+    <div class="row" style="align-items:end;">
+      <div id="meshcore-ports">
+        {% set devices = ports %}
+        {% set current_port = mc_port %}
+        {% include "_meshcore_ports.html" %}
+      </div>
+      <div style="flex:0 0 auto;min-width:0;"><button type="button" class="secondary" hx-post="/settings/detect-ports" hx-target="#meshcore-ports" hx-swap="innerHTML" hx-include="#meshcore_port">Auto-detect USB</button></div>
+    </div>
+    <label>USB serial port (manual path)</label>
+    <input id="meshcore_port" name="meshcore_port" value="{{ mc_port }}" placeholder="/dev/serial/by-id/usb-...">
+    <label style="margin-top:12px;">Network host (only for TCP)</label>
+    <input name="meshcore_host" value="{{ mc_host }}" placeholder="192.168.1.51:4000">
     <div id="meshcore-channel-fields">
       {% include "_radio_channels.html" %}
     </div>
-
-    <label>USB serial port (manual path)</label>
-    <div class="row" style="align-items:end;">
-      <div><input id="meshcore_port" name="meshcore_port" value="{{ mc_port }}" placeholder="/dev/serial/by-id/usb-..."></div>
-      <div><button type="button" class="secondary" hx-post="/settings/detect-ports" hx-target="#meshcore-ports" hx-swap="innerHTML" hx-include="#meshcore_port">Auto-detect USB</button></div>
-    </div>
-    <div id="meshcore-ports" style="margin-top:12px;"></div>
-    <label style="margin-top:12px;">Network host (only for TCP)</label>
-    <input name="meshcore_host" value="{{ mc_host }}" placeholder="192.168.1.51:4000">
   </div>
 
   <div class="panel">
     <h3>BOM service</h3>
     <div class="row">
       <div><label>Poll interval (seconds, min {{ min_interval }})</label><input name="poll_interval" type="number" min="{{ min_interval }}" value="{{ s.poll_interval }}" required></div>
-      <div><label>Contact / User-Agent</label><input name="bom_contact" value="{{ s.bom_contact }}" required></div>
       <div><label>Display timezone</label><select name="display_timezone">{% for val, lbl in timezones %}<option value="{{ val }}" {% if val == tz_current %}selected{% endif %}>{{ lbl }}</option>{% endfor %}</select></div>
     </div>
   </div>
@@ -70,4 +61,97 @@
   <button type="submit">Save settings</button>
 </form>
 
+<script>
+(function () {
+  const panel = document.getElementById('meshcore-channel-fields');
+  const conn = document.querySelector('[name="meshcore_conn"]');
+  const port = document.getElementById('meshcore_port');
+  const host = document.querySelector('[name="meshcore_host"]');
+  let timer;
+  let controller;
+  let requestId = 0;
+  let needsRetry = false;
+
+  function targetKey() {
+    return JSON.stringify([conn.value, conn.value === 'tcp' ? host.value.trim() : port.value.trim()]);
+  }
+
+  function selectedValues() {
+    return ['meshcore_channel', 'meshcore_test_channel'].map(name =>
+      panel.querySelector('[name="' + name + '"]').value);
+  }
+
+  function keepSelections(values) {
+    ['meshcore_channel', 'meshcore_test_channel'].forEach((name, index) => {
+      const select = panel.querySelector('[name="' + name + '"]');
+      if (!Array.from(select.options).some(option => option.value === values[index])) {
+        select.add(new Option(values[index] + ' - current', values[index]));
+      }
+      select.value = values[index];
+    });
+  }
+
+  function clearNames() {
+    const values = selectedValues();
+    panel.querySelectorAll('p.hint').forEach(node => node.remove());
+    ['meshcore_channel', 'meshcore_test_channel'].forEach((name, index) => {
+      const select = panel.querySelector('[name="' + name + '"]');
+      select.replaceChildren(new Option(values[index] + ' - current (names unavailable)', values[index]));
+    });
+  }
+
+  async function refreshChannels() {
+    const key = targetKey();
+    const id = ++requestId;
+    if (controller) controller.abort();
+    if (!(conn.value === 'tcp' ? host.value.trim() : port.value.trim())) return;
+    const values = selectedValues();
+    const body = new URLSearchParams({
+      meshcore_conn: conn.value,
+      meshcore_port: port.value,
+      meshcore_host: host.value,
+      meshcore_channel: values[0],
+      meshcore_test_channel: values[1]
+    });
+    controller = new AbortController();
+    try {
+      const response = await fetch('/settings/channels/meshcore', {
+        method: 'POST', body, signal: controller.signal
+      });
+      if (!response.ok) throw new Error('Channel refresh failed');
+      const html = await response.text();
+      if (id !== requestId || key !== targetKey()) return;
+      const latestValues = selectedValues();
+      panel.innerHTML = html;
+      keepSelections(latestValues);
+      needsRetry = panel.textContent.includes('names unavailable');
+    } catch (error) {
+      if (error.name !== 'AbortError' && id === requestId) {
+        needsRetry = true;
+        const hint = document.createElement('p');
+        hint.className = 'hint';
+        hint.textContent = error.message;
+        panel.prepend(hint);
+      }
+    }
+  }
+
+  function targetChanged() {
+    ++requestId;
+    if (controller) controller.abort();
+    clearTimeout(timer);
+    clearNames();
+    needsRetry = true;
+    timer = setTimeout(refreshChannels, 400);
+  }
+
+  conn.addEventListener('change', targetChanged);
+  port.addEventListener('input', () => { if (conn.value === 'serial') targetChanged(); });
+  host.addEventListener('input', () => { if (conn.value === 'tcp') targetChanged(); });
+  refreshChannels();
+  setInterval(() => {
+    if (needsRetry && document.visibilityState === 'visible') refreshChannels();
+  }, 15000);
+})();
+</script>
 {% endblock %}

@@ -5,6 +5,7 @@ import httpx
 import respx
 
 from app.bom import BOM_BASE_URL, BOM_FEEDS, BOMClient, BOMError, parse_rss
+from app.config import BOM_USER_AGENT
 from app.models import Alert
 
 
@@ -69,7 +70,7 @@ def test_invalid_bom_xml_raises():
 @pytest.mark.asyncio
 @respx.mock
 async def test_fetch_keeps_successful_regions_when_one_feed_fails():
-    respx.get(BOM_BASE_URL + BOM_FEEDS["NSW"]).mock(
+    route = respx.get(BOM_BASE_URL + BOM_FEEDS["NSW"]).mock(
         return_value=httpx.Response(200, text=FIXTURE.read_text())
     )
     respx.get(BOM_BASE_URL + BOM_FEEDS["VIC"]).mock(
@@ -80,6 +81,10 @@ async def test_fetch_keeps_successful_regions_when_one_feed_fails():
     alerts, raw = await client.fetch_active(["NSW", "VIC"])
 
     assert len(alerts) == 2
+    assert route.calls.last.request.headers["user-agent"] == BOM_USER_AGENT
+    assert "Firefox/" in BOM_USER_AGENT
+    assert "MeshCore" not in BOM_USER_AGENT
+    assert "WXEcho" not in BOM_USER_AGENT
     assert "Severe Thunderstorm Warning" in raw
     assert len(client.last_errors) == 1
     assert client.last_errors[0].startswith("VIC: Server error '503 Service Unavailable'")

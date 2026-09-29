@@ -265,3 +265,95 @@ async def test_channel_rename_refreshes_saved_dropdown_labels():
 
     assert await tx.rename_device_channel(2, "Weather") == {"index": 2, "name": "Weather"}
     assert db.settings["meshcore_channels"] == [{"index": 2, "name": "Weather"}]
+@pytest.mark.asyncio
+async def test_load_channels_reads_active_radio_without_reopening():
+    class Database:
+        def get_setting(self, key, default=None):
+            return default
+
+    class Radio:
+        connected = True
+
+        async def read_channels(self):
+            return [{"index": 2, "name": "Weather"}]
+
+        async def read_info(self):
+            return {"model": "Companion", "firmware": "1.0"}
+
+        async def close(self):
+            raise AssertionError("active connection must stay open")
+
+    tx = TransmitManager(Database())
+    transport = tx._transports["meshcore"]
+    transport.target = "/dev/ttyACM0"
+    transport.connected = True
+    transport.tx = Radio()
+
+    channels, model, error = await tx.load_channels(
+        "meshcore", "serial", "/dev/ttyACM0", ""
+    )
+
+    assert channels == [{"index": 2, "name": "Weather"}]
+    assert model == "Companion (fw 1.0)"
+    assert error == ""
+    assert transport.tx.connected
+
+
+@pytest.mark.asyncio
+async def test_load_channels_new_target_keeps_active_radio_connected(monkeypatch):
+    class Database:
+        def get_setting(self, key, default=None):
+            return default
+
+    class ActiveRadio:
+        connected = True
+
+        async def close(self):
+            raise AssertionError("active connection must stay open")
+
+    class TemporaryRadio:
+        def __init__(self, conn, port, host):
+            assert (conn, port, host) == ("serial", "/dev/ttyACM1", "")
+            self.closed = False
+
+        async def connect(self):
+            pass
+
+        async def read_channels(self):
+            return [{"index": 3, "name": "New radio"}]
+
+        async def read_info(self):
+            return {}
+
+        async def close(self):
+            self.closed = True
+
+    temporary = []
+    def make_temporary(*args):
+        radio = TemporaryRadio(*args)
+        temporary.append(radio)
+        return radio
+
+    monkeypatch.setattr("app.transmit.MeshCoreTransmitter", make_temporary)
+    tx = TransmitManager(Database())
+    transport = tx._transports["meshcore"]
+    transport.target = "/dev/ttyACM0"
+    transport.connected = True
+    active = transport.tx = ActiveRadio()
+
+    channels, _, error = await tx.load_channels(
+        "meshcore", "serial", "/dev/ttyACM1", ""
+    )
+
+    assert channels == [{"index": 3, "name": "New radio"}]
+    assert error == ""
+    assert transport.tx is active
+    assert temporary[0].closed
+
+
+def test_legacy_disabled_setting_does_not_disable_meshcore():
+    class Database:
+        def get_setting(self, key, default=None):
+            return {"meshcore_enabled": False}.get(key, default)
+
+    assert TransmitManager(Database()).status()[0]["enabled"] is True

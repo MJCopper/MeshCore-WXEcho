@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__
 from ..config import MAX_PAYLOAD_BYTES, POLL_INTERVAL_MIN, device_writes_enabled
-from ..meshcore_discovery import find_meshcore_devices
+from ..meshcore_discovery import list_usb_serial_devices
 
 
 def _template_dir() -> Path:
@@ -333,31 +333,21 @@ _KNOWN_EVENTS = {event for group in _EVENT_GROUPS.values() for event in group}
 async def settings_page(request: Request):
     db = _db(request)
     s = db.all_settings()
-    mc_channels = s.get("meshcore_channels", []) or []
-    mc_model = s.get("meshcore_model", "") or ""
     mc_connected = _status_flag(request, "meshcore")
     return render(
-        request, "settings.html", s=s, min_interval=POLL_INTERVAL_MIN, ports=None,
+        request, "settings.html", s=s, min_interval=POLL_INTERVAL_MIN, ports=list_usb_serial_devices(),
         timezones=_TIMEZONES, tz_current=(s.get("display_timezone", "") or ""),
         tz_known={v for v, _ in _TIMEZONES},
         event_groups=_EVENT_GROUPS,
         selected_events=set(s.get("filter_include_exact", []) or []),
         all_warnings=bool(s.get("filter_include_suffix", []) or []), err="",
-        mc_enabled=bool(s.get("meshcore_enabled", True)),
         mc_conn=s.get("meshcore_conn", "serial") or "serial",
         mc_port=s.get("meshcore_port", "") or "",
         mc_host=s.get("meshcore_host", "") or "",
-        mc_channel=int(s.get("meshcore_channel", 0) or 0),
-        mc_test=int(s.get("meshcore_test_channel", 1) or 1),
-        mc_channels=mc_channels,
-        mc_connected=mc_connected,
-        mc_model=mc_model,
         **_channel_ctx(
             db,
             _tx(request),
             "meshcore",
-            channels=mc_channels,
-            model=mc_model,
             error="",
             connected=mc_connected,
         ),
@@ -368,13 +358,11 @@ async def settings_page(request: Request):
 async def save_settings(
     request: Request,
     poll_interval: int = Form(...),
-    bom_contact: str = Form(""),
     display_timezone: str = Form("Australia/Sydney"),
     bom_regions: list[str] = Form(default=[]),
     bom_districts: str = Form(""),
     events: list[str] = Form(default=[]),
     all_warnings: str = Form(""),
-    meshcore_enabled: str = Form(""),
     meshcore_conn: str = Form("serial"),
     meshcore_port: str = Form(""),
     meshcore_host: str = Form(""),
@@ -392,13 +380,12 @@ async def save_settings(
     db.set_setting("bom_regions", [r.strip().upper() for r in bom_regions if r.strip()])
     db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
     db.set_setting("poll_interval", interval)
-    db.set_setting("bom_contact", bom_contact.strip())
     db.set_setting("display_timezone", display_timezone.strip())
     db.set_setting("filter_include_exact", [e for e in events if e in _KNOWN_EVENTS])
     db.set_setting("filter_include_suffix", ["Warning"] if all_warnings else [])
     db.set_setting("filter_exclude_exact", [])
 
-    db.set_setting("meshcore_enabled", bool(meshcore_enabled))
+    db.set_setting("meshcore_enabled", True)
     db.set_setting("meshcore_conn", (meshcore_conn or "serial").strip())
     db.set_setting("meshcore_port", meshcore_port.strip())
     db.set_setting("meshcore_host", meshcore_host.strip())
@@ -419,25 +406,29 @@ _RADIO_FIELDS = {
 }
 
 
-_INCLUDE_SEL = {
-    "meshcore": "[name='meshcore_conn'],[name='meshcore_port'],[name='meshcore_host']",
-}
+def _channel_target(conn: str, port: str, host: str) -> dict:
+    return {"conn": conn, "target": (host if conn == "tcp" else port).strip()}
 
 
-def _channel_ctx(db, tx, name, channels=None, model=None, error="", connected=None):
+def _channel_ctx(db, tx, name, channels=None, model=None, error="", connected=None,
+                 conn=None, port=None, host=None, live_val=None, test_val=None):
     conn_f, port_f, host_f, live_f, test_f = _RADIO_FIELDS[name]
-    if channels is None:  # fall back to the last channels we read from this radio
-        channels = db.get_setting(name + "_channels", []) or []
+    conn = conn if conn is not None else (db.get_setting(conn_f, "serial") or "serial")
+    port = port if port is not None else (db.get_setting(port_f, "") or "")
+    host = host if host is not None else (db.get_setting(host_f, "") or "")
+    cached_target = db.get_setting(name + "_channels_target", None)
+    target = _channel_target(conn, port, host)
+    if channels is None:
+        channels = (db.get_setting(name + "_channels", []) or []) if cached_target == target else []
     if model is None:
-        model = db.get_setting(name + "_model", "") or ""
-    if connected is None:  # reflect the live transport's real state
+        model = (db.get_setting(name + "_model", "") or "") if cached_target == target else ""
+    if connected is None:
         connected = any(s["connected"] for s in tx.status() if s["name"] == name)
     return dict(
         radio=name, channels=channels, error=error, connected=connected, model=model,
-        include_sel=_INCLUDE_SEL[name],
         live_field=live_f, test_field=test_f,
-        live_val=int(db.get_setting(live_f, 0) or 0),
-        test_val=int(db.get_setting(test_f, 1) or 1),
+        live_val=int(live_val if live_val is not None else (db.get_setting(live_f, 0) or 0)),
+        test_val=int(test_val if test_val is not None else (db.get_setting(test_f, 1) or 1)),
     )
 
 
@@ -445,22 +436,30 @@ def _channel_ctx(db, tx, name, channels=None, model=None, error="", connected=No
 async def load_channels(request: Request, name: str):
     if name not in _RADIO_FIELDS:
         return PlainTextResponse("unknown radio", status_code=404)
-    conn_f, port_f, host_f, _, _ = _RADIO_FIELDS[name]
+    conn_f, port_f, host_f, live_f, test_f = _RADIO_FIELDS[name]
     form = await request.form()
-    conn = form.get(conn_f, "serial")
-    port = form.get(port_f, "")
-    host = form.get(host_f, "")
     db, tx = _db(request), _tx(request)
+    conn = str(form.get(conn_f, "serial") or "serial").strip()
+    port = str(form.get(port_f, "") or "").strip()
+    host = str(form.get(host_f, "") or "").strip()
+    def selected(field, default):
+        try:
+            return int(form.get(field, db.get_setting(field, default)))
+        except (TypeError, ValueError):
+            return default
+    values = dict(conn=conn, port=port, host=host,
+                  live_val=selected(live_f, 0), test_val=selected(test_f, 1))
     channels, model, error = await tx.load_channels(name, conn, port, host)
-    if channels is not None:  # success: cache names + model so they persist across reload/save
+    if channels is not None:
         db.set_setting(name + "_channels", channels)
         db.set_setting(name + "_model", model)
+        db.set_setting(name + "_channels_target", _channel_target(conn, port, host))
         ctx = _channel_ctx(db, tx, name, channels=channels, model=model,
-                           error="", connected=True)
-    else:  # failed read of THIS device: show the error + saved values, never a stale
-        # cached list from a different radio, and don't claim connected.
+                           error="", connected=True, **values)
+    else:
         ctx = _channel_ctx(db, tx, name, channels=[], model="",
-                           error=error or "could not read this radio", connected=False)
+                           error=error or "could not read this radio", connected=False,
+                           **values)
     return render(request, "_radio_channels.html", **ctx)
 
 
@@ -468,14 +467,7 @@ async def load_channels(request: Request, name: str):
 async def detect_meshcore_ports(request: Request):
     form = await request.form()
     current_port = str(form.get("meshcore_port", "") or "").strip()
-    db = _db(request)
-    saved_port = db.get_setting("meshcore_port", "") or ""
-    saved_conn = db.get_setting("meshcore_conn", "serial") or "serial"
-    active_port = saved_port if saved_conn == "serial" and _status_flag(request, "meshcore") else ""
-    devices = await find_meshcore_devices(
-        active_port=active_port,
-        active_model=db.get_setting("meshcore_model", "") or "",
-    )
+    devices = list_usb_serial_devices()
     return render(
         request,
         "_meshcore_ports.html",

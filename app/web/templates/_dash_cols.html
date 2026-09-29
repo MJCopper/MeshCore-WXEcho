@@ -34,7 +34,7 @@
       {% if t.error and not t.connected %}<div class="node-err">{{ t.error }}</div>{% endif %}
     </div>
     {% else %}
-    <div class="kv"><span class="k">No radios enabled</span><span class="v"><a class="see" href="/settings">Set up &rarr;</a></span></div>
+    <div class="kv"><span class="k">No radio configured</span><span class="v"><a class="see" href="/settings">Set up &rarr;</a></span></div>
     {% endfor %}
     <div class="kv"><span class="k">Last TX</span><span class="v">{{ last_tx }}</span></div>
   </section>

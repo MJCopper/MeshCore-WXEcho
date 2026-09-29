@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.meshcore_discovery import DetectedMeshCore
 from app.web.routes import router
 
 
@@ -57,7 +56,7 @@ def _client(db_settings, load_result=(([], "", "")), connected=False):
     return TestClient(app), app.state.db, app.state.tx
 
 
-def test_settings_page_renders_load_button_and_numeric_fallback():
+def test_settings_page_renders_persistent_dropdowns_and_auto_refresh():
     client, _, _ = _client(
         {
             "meshcore_enabled": True,
@@ -75,15 +74,17 @@ def test_settings_page_renders_load_button_and_numeric_fallback():
     resp = client.get("/settings")
     assert resp.status_code == 200
     body = resp.text
-    assert "hx-post=\"/settings/channels/meshcore\"" in body
-    assert "hx-target=\"#meshcore-channel-fields\"" in body
-    assert "hx-include=\"[name='meshcore_conn'],[name='meshcore_port'],[name='meshcore_host']\"" in body
-    assert 'hx-include="#meshcore_port"' in body
-    assert 'name="meshcore_port"' in body
-    assert "USB serial port (manual path)" in body
-    assert "<div id=\"meshcore-channel-fields\">" in body
-    assert 'name="meshcore_channel" type="number" min="0" value="2"' in body
-    assert 'name="meshcore_test_channel" type="number" min="0" value="5"' in body
+    assert 'id="meshcore_detected_port"' in body
+    assert 'hx-post="/settings/detect-ports"' in body
+    assert 'name="meshcore_channel"' in body
+    assert 'name="meshcore_test_channel"' in body
+    assert 'selected>2 - current (names unavailable)' in body
+    assert 'selected>5 - current (names unavailable)' in body
+    assert "fetch('/settings/channels/meshcore'" in body
+    assert 'Load channels</button>' not in body
+    assert 'name="meshcore_enabled"' not in body
+    assert "Contact / User-Agent" not in body
+
 
 
 def test_settings_page_uses_australian_bom_products():
@@ -115,7 +116,6 @@ def test_save_settings_keeps_only_known_bom_products():
         "/settings",
         data={
             "poll_interval": "120",
-            "bom_contact": "operator@example.com",
             "display_timezone": "Australia/Sydney",
             "events": ["Flood Watch", "Road Weather Alert", "Hurricane Warning"],
             "all_warnings": "on",
@@ -129,51 +129,44 @@ def test_save_settings_keeps_only_known_bom_products():
     assert ("reconfigure",) in tx.calls
 
 
-def test_detect_ports_renders_select_and_active_radio(monkeypatch):
+def test_detect_ports_renders_select_and_saved_path(monkeypatch):
     path = "/dev/serial/by-id/usb-Seeed_Studio_XIAO_nRF52840_B89FC3F98AFD92B1-if00"
-    client, _, _ = _client(
-        {
-            "meshcore_conn": "serial",
-            "meshcore_port": path,
-            "meshcore_model": "Companion",
-        },
-        connected=True,
+    other = "/dev/serial/by-id/usb-Other_Device-if00"
+    client, _, _ = _client({"meshcore_conn": "serial", "meshcore_port": path})
+    monkeypatch.setattr(
+        "app.web.routes.list_usb_serial_devices", lambda: [other, path]
     )
-    calls = []
 
-    async def fake_discovery(**kwargs):
-        calls.append(kwargs)
-        return [DetectedMeshCore(
-            port=path,
-            description="XIAO nRF52840",
-            model="Companion",
-            firmware="1.9.0",
-        )]
-
-    monkeypatch.setattr("app.web.routes.find_meshcore_devices", fake_discovery)
     response = client.post("/settings/detect-ports", data={"meshcore_port": path})
 
     assert response.status_code == 200
     assert '<select id="meshcore_detected_port"' in response.text
     assert f'value="{path}" selected' in response.text
-    assert "Companion (firmware 1.9.0)" in response.text
-    assert "XIAO nRF52840" in response.text
-    assert "document.getElementById('meshcore_port').value" in response.text
-    assert calls == [{"active_port": path, "active_model": "Companion"}]
+    assert f'value="{other}"' in response.text
+    assert "USB serial device" in response.text
+    assert "port.dispatchEvent(new Event('input'" in response.text
 
 
 def test_detect_ports_renders_empty_state(monkeypatch):
     client, _, _ = _client({"meshcore_conn": "serial", "meshcore_port": ""})
+    monkeypatch.setattr("app.web.routes.list_usb_serial_devices", lambda: [])
 
-    async def no_devices(**kwargs):
-        return []
-
-    monkeypatch.setattr("app.web.routes.find_meshcore_devices", no_devices)
     response = client.post("/settings/detect-ports", data={"meshcore_port": ""})
 
     assert response.status_code == 200
-    assert "No MeshCore devices responded" in response.text
-    assert "meshcore_detected_port" not in response.text
+    assert "No devices found in /dev/serial/by-id/." in response.text
+    assert 'id="meshcore_detected_port"' in response.text
+
+
+def test_detect_ports_keeps_saved_path_when_device_is_unplugged(monkeypatch):
+    path = "/dev/serial/by-id/usb-Seeed_Studio_XIAO_nRF52840_B89FC3F98AFD92B1-if00"
+    client, _, _ = _client({"meshcore_port": path})
+    monkeypatch.setattr("app.web.routes.list_usb_serial_devices", lambda: [])
+
+    response = client.post("/settings/detect-ports", data={"meshcore_port": path})
+
+    assert f'value="{path}" selected' in response.text
+    assert "saved path, currently unavailable" in response.text
 
 
 def test_settings_page_renders_selects_when_channels_exist():
@@ -190,6 +183,7 @@ def test_settings_page_renders_selects_when_channels_exist():
                 {"index": 3, "name": "Ops"},
             ],
             "meshcore_model": "Heltec V3",
+            "meshcore_channels_target": {"conn": "serial", "target": "/dev/ttyUSB0"},
             "display_timezone": "Australia/Sydney",
         },
         connected=True,
@@ -241,6 +235,7 @@ def test_load_channels_success_renders_named_selects_and_caches_channels():
         {"index": 2, "name": "Bench"},
     ]
     assert db.get_setting("meshcore_model") == "Heltec V3"
+    assert db.get_setting("meshcore_channels_target") == {"conn": "serial", "target": "/dev/ttyUSB0"}
     assert tx.calls == [("meshcore", "serial", "/dev/ttyUSB0", "")]
 
 
@@ -267,9 +262,56 @@ def test_load_channels_error_shows_error_and_clears_stale_options():
     body = resp.text
     assert "radio timeout" in body
     assert "StaleChannel" not in body
-    assert "<select name=\"meshcore_channel\">" not in body
-    assert 'name="meshcore_channel" type="number" min="0" value="4"' in body
-    assert 'name="meshcore_test_channel" type="number" min="0" value="6"' in body
+    assert "<select name=\"meshcore_channel\">" in body
+    assert "selected>4 - current (names unavailable)" in body
+    assert "selected>6 - current (names unavailable)" in body
     # The DB cache remains untouched on load failure.
     assert db.get_setting("meshcore_channels") == [{"index": 9, "name": "StaleChannel"}]
     assert db.get_setting("meshcore_model") == "Old Model"
+
+
+def test_channel_refresh_keeps_unsaved_channel_selections():
+    client, db, _ = _client(
+        {"meshcore_conn": "serial", "meshcore_port": "/dev/ttyACM0",
+         "meshcore_channel": 1, "meshcore_test_channel": 2},
+        load_result=([{"index": 3, "name": "Weather"}], "Companion", ""),
+    )
+
+    response = client.post("/settings/channels/meshcore", data={
+        "meshcore_conn": "serial", "meshcore_port": "/dev/ttyACM0",
+        "meshcore_channel": "3", "meshcore_test_channel": "5",
+    })
+
+    assert "selected>3 - Weather" in response.text
+    assert "selected>5 - current" in response.text
+    assert db.get_setting("meshcore_channel") == 1
+    assert db.get_setting("meshcore_test_channel") == 2
+
+
+def test_cached_channel_names_are_tied_to_connection_target():
+    client, _, _ = _client({
+        "meshcore_conn": "serial", "meshcore_port": "/dev/ttyACM1",
+        "meshcore_channel": 3, "meshcore_test_channel": 4,
+        "meshcore_channels": [{"index": 3, "name": "Old radio"}],
+        "meshcore_channels_target": {"conn": "serial", "target": "/dev/ttyACM0"},
+    })
+
+    response = client.get("/settings")
+
+    assert "Old radio" not in response.text
+    assert "selected>3 - current (names unavailable)" in response.text
+
+
+def test_saving_settings_forces_meshcore_enabled():
+    client, db, _ = _client({"meshcore_enabled": False})
+
+    response = client.post("/settings", data={
+        "poll_interval": "120",
+        "meshcore_conn": "serial", "meshcore_port": "/dev/ttyACM0",
+        "meshcore_channel": "3", "meshcore_test_channel": "5",
+    }, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert db.get_setting("meshcore_enabled") is True
+    assert db.get_setting("meshcore_channel") == 3
+    assert db.get_setting("meshcore_test_channel") == 5

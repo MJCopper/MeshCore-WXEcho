@@ -9,6 +9,8 @@ from xml.etree import ElementTree
 
 import httpx
 
+from .config import BOM_USER_AGENT
+
 
 class BOMError(RuntimeError):
     pass
@@ -92,8 +94,7 @@ def parse_rss(raw: str, source_url: str = "", districts: list[str] | None = None
 
 
 class BOMClient:
-    def __init__(self, contact: str = "", timeout: float = 30.0):
-        self.contact = contact
+    def __init__(self, timeout: float = 30.0):
         self.timeout = timeout
         self.last_server_date: str | None = None
         self.last_errors: list[str] = []
@@ -107,9 +108,8 @@ class BOMClient:
         if unknown:
             raise BOMError("unknown BOM feed region(s): %s" % ", ".join(sorted(unknown)))
 
-        contact = self.contact or "contact@example.com"
         headers = {
-            "User-Agent": f"MeshCore-BOM-Weather/1.0 ({contact})",
+            "User-Agent": BOM_USER_AGENT,
             "Accept": "application/rss+xml, application/xml",
             "Accept-Encoding": "gzip, deflate",
         }

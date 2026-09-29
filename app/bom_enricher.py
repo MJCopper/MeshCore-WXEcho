@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .config import BOM_USER_AGENT
+
 
 
 @dataclass(frozen=True)
@@ -127,8 +129,7 @@ def _warning_api_url(url: str) -> str:
 
 
 class BOMWarningEnricher:
-    def __init__(self, contact: str = "", timeout: float = 7.0, cache_ttl: float = 600.0, max_cache: int = 20):
-        self.contact = contact
+    def __init__(self, timeout: float = 7.0, cache_ttl: float = 600.0, max_cache: int = 20):
         self.timeout = timeout
         self.cache_ttl = cache_ttl
         self.max_cache = max_cache
@@ -144,7 +145,7 @@ class BOMWarningEnricher:
             self._cache.move_to_end(api_url)
             return cached[1]
         headers = {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": BOM_USER_AGENT,
             "Accept": "application/json",
         }
         result = BOMEnrichment()

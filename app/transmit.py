@@ -14,6 +14,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import BURST_GAP_SECONDS, REPEAT_GAP_SECONDS, QUEUE_MAX, MAX_PAYLOAD_BYTES
 
@@ -292,7 +293,7 @@ def _build_transports(db) -> dict:
     mc_conn = g("meshcore_conn", "serial") or "serial"
     mc = Transport(
         name="meshcore", label="MeshCore",
-        enabled=bool(g("meshcore_enabled", True)),
+        enabled=True,
         conn=mc_conn, channel=num("meshcore_channel", 0),
         target=(g("meshcore_host", "") if mc_conn == "tcp" else g("meshcore_port", "")) or "",
         make=lambda: MeshCoreTransmitter(mc_conn, g("meshcore_port", "") or "", g("meshcore_host", "") or ""),
@@ -419,6 +420,9 @@ class TransmitManager:
             renamed = await self._saved_radio().rename_channel(index, name)
             channels = await self._saved_radio().read_channels()
             self._db.set_setting("meshcore_channels", channels)
+            transport = self._transports["meshcore"]
+            self._db.set_setting("meshcore_channels_target",
+                                 {"conn": transport.conn, "target": transport.target})
             return renamed
 
     async def set_port(self, port: str) -> None:
@@ -607,45 +611,46 @@ class TransmitManager:
         return await self._send_all(text, manual=True, on_test=True)
 
     async def load_channels(self, name: str, conn: str, port: str, host: str):
-        """Open a transient connection with the given params; read the device's
-        channels and model. Returns (channels|None, model_str, error). Frees the
-        live port first so it never double-opens, then restores the live link."""
+        """Read channels through the live link, or a temporary link for a new target."""
         async with self._lock:
             t = self._transports.get(name)
-            if t is None:
+            if t is None or name != "meshcore":
                 return None, "", "unknown radio"
-            if t.tx is not None:            # release the live connection first
-                try:
-                    await t.tx.close()
-                except Exception:
-                    pass
-                t.tx, t.connected = None, False
-            if name != "meshcore":
-                return None, "", "unknown radio"
-            maker = MeshCoreTransmitter
-            tx = maker(conn or "serial", port or "", host or "")
+            conn = conn or "serial"
+            target = (host if conn == "tcp" else port) or ""
+            if not target.strip():
+                return None, "", "configure a USB port or network host to load channels"
+
+            same_target = t.conn == conn and (
+                t.target == target or (
+                    conn == "serial" and bool(t.target) and
+                    Path(t.target).resolve() == Path(target).resolve()
+                )
+            )
+            if same_target:
+                if not t.connected or t.tx is None or not t.tx.connected:
+                    if not await self._ensure(t):
+                        return None, "", t.error or "radio is offline"
+                tx = t.tx
+            else:
+                tx = MeshCoreTransmitter(conn, port or "", host or "")
             try:
-                await tx.connect()
+                if not same_target:
+                    await tx.connect()
                 channels = await tx.read_channels()
-                model = ""
                 try:
                     model = _fmt_model(await tx.read_info())
                 except Exception:
-                    pass
-                result = (channels, model, "")
+                    model = ""
+                return channels, model, ""
             except Exception as exc:
-                result = (None, "", str(exc))
+                return None, "", str(exc)
             finally:
-                try:
-                    await tx.close()
-                except Exception:
-                    pass
-            # best-effort: bring the live link back so "Connect" doesn't leave it offline
-            try:
-                await self._ensure(t)
-            except Exception:
-                pass
-            return result
+                if not same_target:
+                    try:
+                        await tx.close()
+                    except Exception:
+                        pass
 
     async def send_to(self, name: str, text: str) -> tuple[bool, str]:
         """Key up a single named radio (bench testing). Returns (ok, error)."""
