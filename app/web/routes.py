@@ -6,12 +6,12 @@ import sys
 from pathlib import Path
 import datetime
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__
-from ..config import MAX_PAYLOAD_BYTES, POLL_INTERVAL_MIN, device_writes_enabled
+from ..config import MAX_PAYLOAD_BYTES, POLL_INTERVAL_MIN
 from ..meshcore_discovery import list_usb_serial_devices
 
 
@@ -484,45 +484,66 @@ async def meshcore_settings_page(request: Request, saved: str = ""):
         device = await _tx(request).get_device_settings()
     except RuntimeError as exc:
         error = str(exc)
+    saved_labels = {"name": "Device name", "channel": "Channel name",
+                    "power": "TX power", "radio": "Radio parameters"}
     return render(request, "meshcore_settings.html", device=device,
-                  editable=device_writes_enabled(), error=error,
-                  saved=saved if saved in {"name", "channel"} else "")
+                  error=error, saved_label=saved_labels.get(saved, ""))
 
 
-def _require_device_writes() -> None:
-    if not device_writes_enabled():
-        raise HTTPException(status_code=403, detail="Companion settings writes are disabled")
-
-
-def _device_edit_error(request: Request, error: str, status_code: int):
-    response = render(request, "meshcore_settings.html", device=None,
-                      editable=device_writes_enabled(), error=error, saved="")
+async def _device_edit_error(request: Request, error: str, status_code: int):
+    try:
+        device = await _tx(request).get_device_settings()
+    except RuntimeError:
+        device = None
+    response = render(request, "meshcore_settings.html", device=device,
+                      error=error, saved_label="")
     response.status_code = status_code
     return response
 
 
 @router.post("/meshcore/settings/name", response_class=HTMLResponse)
 async def save_meshcore_name(request: Request, name: str = Form(...)):
-    _require_device_writes()
     try:
         await _tx(request).set_device_name(name)
     except ValueError as exc:
-        return _device_edit_error(request, str(exc), 400)
+        return await _device_edit_error(request, str(exc), 400)
     except RuntimeError as exc:
-        return _device_edit_error(request, str(exc), 503)
+        return await _device_edit_error(request, str(exc), 503)
     return RedirectResponse("/meshcore/settings?saved=name", status_code=303)
 
 
 @router.post("/meshcore/settings/channel/{index}", response_class=HTMLResponse)
 async def save_meshcore_channel(request: Request, index: int, name: str = Form(...)):
-    _require_device_writes()
     try:
         await _tx(request).rename_device_channel(index, name)
     except ValueError as exc:
-        return _device_edit_error(request, str(exc), 400)
+        return await _device_edit_error(request, str(exc), 400)
     except RuntimeError as exc:
-        return _device_edit_error(request, str(exc), 503)
+        return await _device_edit_error(request, str(exc), 503)
     return RedirectResponse("/meshcore/settings?saved=channel", status_code=303)
+
+
+@router.post("/meshcore/settings/tx-power", response_class=HTMLResponse)
+async def save_meshcore_tx_power(request: Request, power: int = Form(...)):
+    try:
+        await _tx(request).set_tx_power(power)
+    except ValueError as exc:
+        return await _device_edit_error(request, str(exc), 400)
+    except RuntimeError as exc:
+        return await _device_edit_error(request, str(exc), 503)
+    return RedirectResponse("/meshcore/settings?saved=power", status_code=303)
+
+
+@router.post("/meshcore/settings/radio", response_class=HTMLResponse)
+async def save_meshcore_radio(request: Request, freq: float = Form(...), bw: float = Form(...),
+                              sf: int = Form(...), cr: int = Form(...)):
+    try:
+        await _tx(request).set_radio_parameters(freq, bw, sf, cr)
+    except ValueError as exc:
+        return await _device_edit_error(request, str(exc), 400)
+    except RuntimeError as exc:
+        return await _device_edit_error(request, str(exc), 503)
+    return RedirectResponse("/meshcore/settings?saved=radio", status_code=303)
 
 
 # ---- manual send -------------------------------------------------------

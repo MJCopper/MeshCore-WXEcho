@@ -11,6 +11,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import logging
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -220,6 +221,61 @@ class MeshCoreTransmitter(Transmitter):
             raise RuntimeError("could not verify the saved device name")
         return name
 
+    async def set_tx_power(self, power: int) -> int:
+        from meshcore import EventType
+
+        if not self.connected:
+            raise RuntimeError("MeshCore radio is offline")
+        current = await self._mc.commands.send_appstart()
+        if current.type != EventType.SELF_INFO:
+            raise RuntimeError("could not read the radio's TX power limit")
+        limit = (current.payload or {}).get("max_tx_power")
+        if limit is None:
+            raise RuntimeError("radio did not report its TX power limit")
+        if not 0 <= power <= int(limit):
+            raise ValueError(f"TX power must be between 0 and {limit} dBm")
+        result = await self._mc.commands.set_tx_power(power)
+        if result.type != EventType.OK:
+            raise RuntimeError("radio rejected the TX power")
+        verified = await self._mc.commands.send_appstart()
+        if verified.type != EventType.SELF_INFO or (verified.payload or {}).get("tx_power") != power:
+            raise RuntimeError("could not verify the saved TX power")
+        return power
+
+    async def set_radio_parameters(self, freq: float, bw: float, sf: int, cr: int) -> dict:
+        from meshcore import EventType
+
+        if not (math.isfinite(freq) and 100 <= freq <= 2500):
+            raise ValueError("frequency must be between 100 and 2500 MHz")
+        if not (math.isfinite(bw) and 1 <= bw <= 2500):
+            raise ValueError("bandwidth must be between 1 and 2500 kHz")
+        if not 5 <= sf <= 12:
+            raise ValueError("spreading factor must be between 5 and 12")
+        if not 5 <= cr <= 8:
+            raise ValueError("coding rate must be between 5 and 8")
+        if not self.connected:
+            raise RuntimeError("MeshCore radio is offline")
+        result = await self._mc.commands.set_radio(freq, bw, sf, cr)
+        if result.type != EventType.OK:
+            raise RuntimeError("radio rejected the radio parameters")
+        verified = await self._mc.commands.send_appstart()
+        if verified.type != EventType.SELF_INFO:
+            raise RuntimeError("could not verify the saved radio parameters")
+        saved = verified.payload or {}
+        try:
+            saved_freq = float(saved["radio_freq"])
+            saved_bw = float(saved["radio_bw"])
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeError("could not verify the saved radio parameters")
+        if not (
+            math.isclose(saved_freq, freq, rel_tol=0, abs_tol=0.0015) and
+            math.isclose(saved_bw, bw, rel_tol=0, abs_tol=0.0015) and
+            saved.get("radio_sf") == sf and saved.get("radio_cr") == cr
+        ):
+            raise RuntimeError("radio parameters did not match after saving")
+        return {"radio_freq": saved["radio_freq"], "radio_bw": saved["radio_bw"],
+                "radio_sf": sf, "radio_cr": cr}
+
     async def rename_channel(self, index: int, name: str) -> dict:
         from meshcore import EventType
 
@@ -414,6 +470,14 @@ class TransmitManager:
     async def set_device_name(self, name: str) -> str:
         async with self._lock:
             return await self._saved_radio().set_device_name(name)
+
+    async def set_tx_power(self, power: int) -> int:
+        async with self._lock:
+            return await self._saved_radio().set_tx_power(power)
+
+    async def set_radio_parameters(self, freq: float, bw: float, sf: int, cr: int) -> dict:
+        async with self._lock:
+            return await self._saved_radio().set_radio_parameters(freq, bw, sf, cr)
 
     async def rename_device_channel(self, index: int, name: str) -> dict:
         async with self._lock:

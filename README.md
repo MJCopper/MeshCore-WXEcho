@@ -1,8 +1,12 @@
+# ⚠️ WARNING: UNOFFICIAL PERSONAL PROJECT — DO NOT RELY ON IT
+
+> **This is an unofficial personal project. It is not suitable for serious, emergency, or safety-critical use. Do not trust any of its inputs or outputs.** Incoming data, settings, displayed warnings, and transmitted messages may be wrong, incomplete, delayed, or missing. Verify information independently using official Bureau of Meteorology and local emergency sources. Never make a safety decision based on WXEcho.
+
+---
+
 # MeshCore BOM Weather
 
 MeshCore BOM Weather polls official Australian Bureau of Meteorology warning RSS feeds and broadcasts selected warnings over a MeshCore radio. It is a small self-hosted web app for a Raspberry Pi, Linux host, Windows machine, or Docker.
-
-> This is a supplemental warning broadcaster, not a certified warning system. Keep official BOM channels and other local emergency sources available. Test in dry-run mode before enabling live broadcasts.
 
 ## Features
 
@@ -73,9 +77,7 @@ WXEcho retries a saved but disconnected radio in the background about every 15 s
 
 ### Companion settings
 
-The MeshCore Settings page reads the saved radio's name, firmware, battery, radio parameters and configured channels from the connected companion. It can edit the device name and existing channel names without changing channel keys. PINs, keys, radio parameters and reset controls are not editable there.
-
-Device changes are disabled by default. The example Compose file publishes port 8110 on all interfaces, which would let a visitor bypass an authenticated reverse proxy. Before enabling edits behind Authentik, restrict direct access to that port: bind it to `127.0.0.1:8110:8000` when the proxy runs on the same host, or restrict it with a private network/firewall when the proxy runs elsewhere. Only then set `WX_ECHO_DEVICE_WRITES_ENABLED=1` in the app environment and restart WXEcho. The server rejects edit requests when this flag is unset, even if a client sends a POST directly.
+The MeshCore Settings page reads the saved radio's name, firmware, battery, TX power, radio parameters and configured channels from the connected companion. When the radio is connected, you can edit its name, TX power, frequency, bandwidth, spreading factor, coding rate and existing channel names. Channel renaming preserves the channel keys. Saved values are read back from the radio; model, firmware, battery, keys and PINs are not editable on this page. The page is intended for a trusted network and does not have a separate device-write switch.
 
 ## License
 

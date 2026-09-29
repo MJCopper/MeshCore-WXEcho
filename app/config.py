@@ -37,10 +37,6 @@ def _env_with_legacy(name: str, default: str | None = None) -> str | None:
     return default
 
 
-def device_writes_enabled() -> bool:
-    return os.environ.get("WX_ECHO_DEVICE_WRITES_ENABLED", "").lower() in {"1", "true", "yes", "on"}
-
-
 def default_data_dir() -> Path:
     """Per-OS location for the database and other runtime state.
 

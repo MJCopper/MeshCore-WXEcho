@@ -126,6 +126,76 @@ async def test_channel_rename_rejects_changed_secret_on_readback():
         await transmitter.rename_channel(1, "Ops")
 
 
+@pytest.mark.asyncio
+async def test_tx_power_write_checks_device_limit_and_readback():
+    class Commands:
+        power = 20
+        writes = []
+
+        async def send_appstart(self):
+            return SimpleNamespace(type=EventType.SELF_INFO,
+                                   payload={"max_tx_power": 22, "tx_power": self.power})
+
+        async def set_tx_power(self, power):
+            self.writes.append(power)
+            self.power = power
+            return SimpleNamespace(type=EventType.OK)
+
+    commands = Commands()
+    transmitter = MeshCoreTransmitter("serial")
+    transmitter._mc = SimpleNamespace(is_connected=True, commands=commands)
+
+    with pytest.raises(ValueError, match="between 0 and 22"):
+        await transmitter.set_tx_power(23)
+    assert commands.writes == []
+    assert await transmitter.set_tx_power(21) == 21
+    assert commands.writes == [21]
+
+    async def stale_readback():
+        return SimpleNamespace(type=EventType.SELF_INFO,
+                               payload={"max_tx_power": 22, "tx_power": 20})
+    commands.send_appstart = stale_readback
+    with pytest.raises(RuntimeError, match="verify"):
+        await transmitter.set_tx_power(19)
+
+
+@pytest.mark.asyncio
+async def test_radio_parameter_write_validates_and_verifies_readback():
+    class Commands:
+        values = {"radio_freq": 915.0, "radio_bw": 250.0,
+                  "radio_sf": 10, "radio_cr": 5}
+        writes = []
+
+        async def set_radio(self, freq, bw, sf, cr):
+            self.writes.append((freq, bw, sf, cr))
+            self.values = {"radio_freq": freq, "radio_bw": bw,
+                           "radio_sf": sf, "radio_cr": cr}
+            return SimpleNamespace(type=EventType.OK)
+
+        async def send_appstart(self):
+            return SimpleNamespace(type=EventType.SELF_INFO, payload=self.values)
+
+    commands = Commands()
+    transmitter = MeshCoreTransmitter("serial")
+    transmitter._mc = SimpleNamespace(is_connected=True, commands=commands)
+
+    with pytest.raises(ValueError, match="spreading factor"):
+        await transmitter.set_radio_parameters(915.0, 250.0, 13, 5)
+    assert commands.writes == []
+    saved = await transmitter.set_radio_parameters(916.0, 125.0, 9, 6)
+    assert saved == {"radio_freq": 916.0, "radio_bw": 125.0,
+                     "radio_sf": 9, "radio_cr": 6}
+    assert commands.writes == [(916.0, 125.0, 9, 6)]
+
+    async def stale_readback():
+        return SimpleNamespace(type=EventType.SELF_INFO,
+                               payload={"radio_freq": 915.0, "radio_bw": 250.0,
+                                        "radio_sf": 10, "radio_cr": 5})
+    commands.send_appstart = stale_readback
+    with pytest.raises(RuntimeError, match="did not match"):
+        await transmitter.set_radio_parameters(916.0, 125.0, 9, 6)
+
+
 def _web_client(connected=True):
     class Database:
         def get_setting(self, key, default=None):
@@ -141,6 +211,7 @@ def _web_client(connected=True):
             return {"name": "Weather node", "model": "Companion", "firmware": "1.4",
                     "battery_mv": 3900, "radio_freq": 915.0, "radio_bw": 250.0,
                     "radio_sf": 10, "radio_cr": 5, "tx_power": 20,
+                    "max_tx_power": 22,
                     "channels": [{"index": 0, "name": "Alerts", "hash": "ab"}]}
 
         async def set_device_name(self, name):
@@ -149,6 +220,12 @@ def _web_client(connected=True):
         async def rename_device_channel(self, index, name):
             self.calls.append(("channel", index, name))
 
+        async def set_tx_power(self, power):
+            self.calls.append(("power", power))
+
+        async def set_radio_parameters(self, freq, bw, sf, cr):
+            self.calls.append(("radio", freq, bw, sf, cr))
+
     app = FastAPI()
     app.include_router(router)
     app.state.db = Database()
@@ -156,24 +233,24 @@ def _web_client(connected=True):
     return TestClient(app), app.state.tx
 
 
-def test_companion_page_is_read_only_by_default(monkeypatch):
-    monkeypatch.delenv("WX_ECHO_DEVICE_WRITES_ENABLED", raising=False)
+def test_companion_page_is_editable():
     client, radio = _web_client()
     response = client.get("/meshcore/settings")
 
     assert response.status_code == 200
     assert "Weather node" in response.text
     assert "Alerts" in response.text
-    assert "MeshCore Settings" in response.text
     assert "channel_secret" not in response.text
-    assert "Save name" not in response.text
-    assert client.post("/meshcore/settings/name", data={"name": "New"}).status_code == 403
-    assert client.post("/meshcore/settings/channel/0", data={"name": "Ops"}).status_code == 403
-    assert radio.calls == []
+    assert 'action="/meshcore/settings/name"' in response.text
+    assert 'action="/meshcore/settings/channel/0"' in response.text
+    assert 'action="/meshcore/settings/tx-power"' in response.text
+    assert 'action="/meshcore/settings/radio"' in response.text
+    assert client.post("/meshcore/settings/name", data={"name": "New"}, follow_redirects=False).status_code == 303
+    assert client.post("/meshcore/settings/channel/0", data={"name": "Ops"}, follow_redirects=False).status_code == 303
+    assert radio.calls == [("name", "New"), ("channel", 0, "Ops")]
 
 
-def test_companion_page_shows_offline_state(monkeypatch):
-    monkeypatch.delenv("WX_ECHO_DEVICE_WRITES_ENABLED", raising=False)
+def test_companion_page_shows_offline_state():
     client, _ = _web_client(connected=False)
     response = client.get("/meshcore/settings")
 
@@ -182,21 +259,24 @@ def test_companion_page_shows_offline_state(monkeypatch):
     assert "Save name" not in response.text
 
 
-def test_companion_edits_are_guarded_and_redirect_when_enabled(monkeypatch):
-    monkeypatch.setenv("WX_ECHO_DEVICE_WRITES_ENABLED", "1")
+def test_companion_radio_edits_redirect_after_save():
     client, radio = _web_client()
     response = client.get("/meshcore/settings")
     assert response.status_code == 200
     assert 'action="/meshcore/settings/name"' in response.text
     assert 'action="/meshcore/settings/channel/0"' in response.text
+    assert 'action="/meshcore/settings/tx-power"' in response.text
+    assert 'action="/meshcore/settings/radio"' in response.text
 
     assert client.post("/meshcore/settings/name", data={"name": "New"}, follow_redirects=False).status_code == 303
     assert client.post("/meshcore/settings/channel/0", data={"name": "Ops"}, follow_redirects=False).status_code == 303
-    assert radio.calls == [("name", "New"), ("channel", 0, "Ops")]
+    assert client.post("/meshcore/settings/tx-power", data={"power": "21"}, follow_redirects=False).status_code == 303
+    assert client.post("/meshcore/settings/radio", data={"freq": "915", "bw": "250", "sf": "10", "cr": "5"}, follow_redirects=False).status_code == 303
+    assert radio.calls == [("name", "New"), ("channel", 0, "Ops"),
+                           ("power", 21), ("radio", 915.0, 250.0, 10, 5)]
 
 
-def test_failed_device_edit_renders_error_page(monkeypatch):
-    monkeypatch.setenv("WX_ECHO_DEVICE_WRITES_ENABLED", "1")
+def test_failed_device_edit_renders_error_page():
     client, radio = _web_client()
 
     async def invalid_name(name):
@@ -207,6 +287,7 @@ def test_failed_device_edit_renders_error_page(monkeypatch):
     assert response.status_code == 400
     assert "invalid device name" in response.text
     assert "MeshCore Settings" in response.text
+    assert 'action="/meshcore/settings/name"' in response.text
 
 
 @pytest.mark.asyncio
