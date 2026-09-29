@@ -37,6 +37,28 @@ def test_bom_district_filter_and_cancellation():
     assert alerts[0]["event"] == "Severe Thunderstorm Warning"
 
 
+def test_parse_timestamped_marine_warning_summary():
+        raw = """<rss><channel>
+            <item>
+                <title>29/16:05 EST Marine Wind Warning Summary for New South Wales</title>
+                <guid>marine-current</guid>
+            </item>
+            <item>
+                <title>29/16:10 EST Cancellation of Marine Wind Warning Summary for South Australia</title>
+                <guid>marine-cancelled</guid>
+            </item>
+        </channel></rss>"""
+
+        current, cancelled = parse_rss(raw)
+
+        assert current["event"] == "Marine Wind Warning"
+        assert current["area_desc"] == "New South Wales"
+        assert current["message_type"] == "Alert"
+        assert cancelled["event"] == "Marine Wind Warning"
+        assert cancelled["area_desc"] == "South Australia"
+        assert cancelled["message_type"] == "Cancel"
+
+
 def test_invalid_bom_xml_raises():
     with pytest.raises(BOMError):
         parse_rss("<not-rss>")

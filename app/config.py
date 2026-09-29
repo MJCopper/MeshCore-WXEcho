@@ -146,7 +146,7 @@ DEFAULT_SETTINGS: dict = {
     # Filter rules (editable). An alert is INCLUDED when its event is in
     # filter_include_exact OR ends with any suffix in filter_include_suffix,
     # UNLESS the event is in filter_exclude_exact.
-    "filter_include_exact": ["Tornado Watch"],
+    "filter_include_exact": [],
     "filter_include_suffix": ["Warning"],
     "filter_exclude_exact": [],
 }

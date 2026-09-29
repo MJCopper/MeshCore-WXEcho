@@ -8,6 +8,7 @@ from app.web.routes import router
 class FakeDB:
     def __init__(self, settings=None):
         self._settings = dict(settings or {})
+        self.events = []
 
     def all_settings(self):
         return dict(self._settings)
@@ -17,6 +18,9 @@ class FakeDB:
 
     def set_setting(self, key, value):
         self._settings[key] = value
+
+    def add_event(self, level, message):
+        self.events.append((level, message))
 
 
 class FakeTx:
@@ -32,13 +36,24 @@ class FakeTx:
     def status(self):
         return [{"name": "meshcore", "connected": self._connected}]
 
+    async def reconfigure(self):
+        self.calls.append(("reconfigure",))
+
+
+class FakePoller:
+    def __init__(self):
+        self.poked = False
+
+    def poke(self):
+        self.poked = True
+
 
 def _client(db_settings, load_result=(([], "", "")), connected=False):
     app = FastAPI()
     app.include_router(router)
     app.state.db = FakeDB(db_settings)
     app.state.tx = FakeTx(load_result=load_result, connected=connected)
-    app.state.poller = object()
+    app.state.poller = FakePoller()
     return TestClient(app), app.state.db, app.state.tx
 
 
@@ -69,6 +84,49 @@ def test_settings_page_renders_load_button_and_numeric_fallback():
     assert "<div id=\"meshcore-channel-fields\">" in body
     assert 'name="meshcore_channel" type="number" min="0" value="2"' in body
     assert 'name="meshcore_test_channel" type="number" min="0" value="5"' in body
+
+
+def test_settings_page_uses_australian_bom_products():
+    client, _, _ = _client(
+        {
+            "filter_include_exact": [],
+            "filter_include_suffix": ["Warning"],
+            "display_timezone": "Australia/Sydney",
+        }
+    )
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "Severe Weather Warning" in response.text
+    assert "Marine Wind Warning" in response.text
+    assert "Warning to Sheep Graziers" in response.text
+    assert "Flood Watch" in response.text
+    assert "Tropical Cyclone Advice" in response.text
+    assert "Road Weather Alert" in response.text
+    assert "Hurricane Warning" not in response.text
+    assert "Winter Weather Advisory" not in response.text
+
+
+def test_save_settings_keeps_only_known_bom_products():
+    client, db, tx = _client({})
+
+    response = client.post(
+        "/settings",
+        data={
+            "poll_interval": "120",
+            "bom_contact": "operator@example.com",
+            "display_timezone": "Australia/Sydney",
+            "events": ["Flood Watch", "Road Weather Alert", "Hurricane Warning"],
+            "all_warnings": "on",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert db.get_setting("filter_include_exact") == ["Flood Watch", "Road Weather Alert"]
+    assert db.get_setting("filter_include_suffix") == ["Warning"]
+    assert ("reconfigure",) in tx.calls
 
 
 def test_detect_ports_renders_select_and_active_radio(monkeypatch):

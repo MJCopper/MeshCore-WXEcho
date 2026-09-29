@@ -42,11 +42,12 @@ def _parse_date(value: str) -> str:
 
 def _split_title(title: str) -> tuple[str, str]:
     title = re.sub(r"\s+", " ", title).strip()
+    title = re.sub(r"^\d{1,2}/\d{1,2}:\d{2}\s+[A-Z]{2,5}\s+", "", title)
     for marker in (" for ", " - ", ": "):
         if marker in title:
             event, area = title.split(marker, 1)
-            return event.strip(), area.strip()
-    return title, ""
+            return re.sub(r"\s+Summary$", "", event).strip(), area.strip()
+    return re.sub(r"\s+Summary$", "", title).strip(), ""
 
 
 def parse_rss(raw: str, source_url: str = "", districts: list[str] | None = None) -> list[dict]:

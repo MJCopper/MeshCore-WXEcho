@@ -110,6 +110,14 @@ class Database:
                         "INSERT INTO settings(key, value) VALUES (?, ?)",
                         (key, json.dumps(value)),
                     )
+            legacy_filter = self._conn.execute(
+                "SELECT value FROM settings WHERE key = 'filter_include_exact'"
+            ).fetchone()
+            if legacy_filter and json.loads(legacy_filter["value"]) == ["Tornado Watch"]:
+                self._conn.execute(
+                    "UPDATE settings SET value = ? WHERE key = 'filter_include_exact'",
+                    (json.dumps([]),),
+                )
             self._conn.commit()
 
     # ---- settings -------------------------------------------------------

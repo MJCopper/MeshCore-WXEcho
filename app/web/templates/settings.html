@@ -17,16 +17,14 @@
 
   <div class="panel">
     <h3>What to broadcast</h3>
-    <label class="chk"><input type="checkbox" name="all_warnings" {% if all_warnings %}checked{% endif %}> <b>All warning products</b></label>
-    <p class="hint">Warnings cover the life-safety products published by BOM. Add specific watches and advisories below when needed.</p>
-    <div class="grp-title">Watches</div>
-    <div class="checkgrid">
-      {% for ev in event_groups.Watches %}<label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>{% endfor %}
-    </div>
-    <div class="grp-title">Advisories and statements</div>
-    <div class="checkgrid">
-      {% for ev in event_groups.Advisories %}<label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>{% endfor %}
-    </div>
+    <label class="chk"><input type="checkbox" name="all_warnings" {% if all_warnings %}checked{% endif %}> <b>All BOM warning products</b></label>
+    <p class="hint">Select individual warning products only when the all-warnings option is off. Watches, advice and alerts are always selected separately.</p>
+    {% for group, group_events in event_groups.items() %}
+      <div class="grp-title">{{ group }}</div>
+      <div class="checkgrid">
+        {% for ev in group_events %}<label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>{% endfor %}
+      </div>
+    {% endfor %}
   </div>
 
   <div class="panel">

@@ -300,18 +300,18 @@ _TIMEZONES = [
 ]
 
 _EVENT_GROUPS = {
-    "Warnings": ["Tornado Warning","Severe Thunderstorm Warning","Flash Flood Warning",
-        "Flood Warning","Hurricane Warning","Tropical Storm Warning","Storm Surge Warning",
-        "Winter Storm Warning","Ice Storm Warning","Blizzard Warning","High Wind Warning",
-        "Extreme Heat Warning","Excessive Heat Warning","Red Flag Warning","Dust Storm Warning",
-        "Freeze Warning"],
-    "Watches": ["Tornado Watch","Severe Thunderstorm Watch","Flash Flood Watch","Flood Watch",
-        "Hurricane Watch","Tropical Storm Watch","Winter Storm Watch","High Wind Watch",
-        "Fire Weather Watch"],
-    "Advisories": ["Special Weather Statement","Severe Weather Statement","Heat Advisory",
-        "Wind Advisory","Winter Weather Advisory","Flood Advisory","Dense Fog Advisory",
-        "Frost Advisory","Air Quality Alert","Coastal Flood Advisory","Rip Current Statement"],
+    "Warning products": [
+        "Severe Thunderstorm Warning", "Severe Weather Warning", "Flood Warning",
+        "Fire Weather Warning", "Heatwave Warning", "Tropical Cyclone Warning",
+        "Tsunami Warning", "Marine Wind Warning", "Hazardous Surf Warning",
+        "Damaging Surf Warning", "Coastal Hazard Warning", "Frost Warning",
+        "Warning to Sheep Graziers",
+    ],
+    "Watches and advice": ["Flood Watch", "Tropical Cyclone Advice"],
+    "Specialised alerts": ["Road Weather Alert", "Bush Walkers Weather Alert"],
 }
+
+_KNOWN_EVENTS = {event for group in _EVENT_GROUPS.values() for event in group}
 
 
 # ---- settings ----------------------------------------------------------
@@ -383,7 +383,7 @@ async def save_settings(
     db.set_setting("poll_interval", interval)
     db.set_setting("bom_contact", bom_contact.strip())
     db.set_setting("display_timezone", display_timezone.strip())
-    db.set_setting("filter_include_exact", [e for e in events if e])
+    db.set_setting("filter_include_exact", [e for e in events if e in _KNOWN_EVENTS])
     db.set_setting("filter_include_suffix", ["Warning"] if all_warnings else [])
     db.set_setting("filter_exclude_exact", [])
 

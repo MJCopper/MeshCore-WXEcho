@@ -1,10 +1,8 @@
 """Alert include/exclude filtering.
 
 Default policy:
-  INCLUDE  event exactly "Tornado Watch" (and "Tornado Warning")
-  INCLUDE  any event ending in "Warning"
-  EXCLUDE  everything else: advisories, statements, outlooks, and all
-           non-tornado watches (Severe Thunderstorm Watch, etc.)
+    INCLUDE  BOM products ending in "Warning" or starting with "Warning to"
+    EXCLUDE  watches, advice and alerts unless selected in Settings
 
 The rules are data-driven so the Settings page can edit them.
 """
@@ -28,6 +26,16 @@ class FilterRules:
         )
 
 
+def _matches_product(event: str, product: str) -> bool:
+    if event == product:
+        return True
+    if product in {"Flood Watch", "Flood Warning"}:
+        return event.endswith(product)
+    if product in {"Tropical Cyclone Advice", "Tropical Cyclone Warning"}:
+        return event.startswith(product)
+    return False
+
+
 def should_include(event: str, rules: FilterRules) -> bool:
     """Return True if an alert with this event name should be broadcast."""
     event = (event or "").strip()
@@ -35,9 +43,9 @@ def should_include(event: str, rules: FilterRules) -> bool:
         return False
     if event in rules.exclude_exact:
         return False
-    if event in rules.include_exact:
+    if any(_matches_product(event, product) for product in rules.include_exact):
         return True
     for suffix in rules.include_suffix:
-        if suffix and event.endswith(suffix):
+        if suffix and (event.endswith(suffix) or event.startswith(suffix + " to ")):
             return True
     return False
