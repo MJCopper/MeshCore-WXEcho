@@ -81,8 +81,8 @@ def test_build_mesh_parts_splits_enriched_alert_with_markers_and_byte_caps():
 
 def test_final_verification_payload_is_exact_and_within_byte_cap():
     assert FINAL_VERIFICATION_MESSAGE == (
-        "UNOFFICIAL automated relay. May be incomplete or inaccurate. Verify warnings at "
-        "bom.gov.au/weather-and-climate/warnings-and-alerts"
+        "UNOFFICIAL automated relay. May be inaccurate, incomplete, delayed, or missing. "
+        "VERIFY information independently. NEVER make a safety decision based on these notices."
     )
     assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) <= MAX_PAYLOAD_BYTES
 
@@ -103,10 +103,10 @@ def test_marine_warning_sections_keep_cancellations_distinct():
     )
     parts = build_mesh_parts(alert, "Australia/Sydney")
     assert len(parts) == 2
-    assert "Strong Wind Warning" in parts[0]
+    assert parts[0].startswith("Wednesday: Strong Wind Warning for Hunter Coast")
     assert "Hunter Coast" in parts[0]
     assert "Illawarra Coast" in parts[0]
-    assert "Cancellation" in parts[1]
+    assert parts[1].startswith("Wednesday: Cancellation of Marine Wind Warning for Batemans Coast")
     assert "Batemans Coast" in parts[1]
     assert "Eden Coast" in parts[1]
     assert all(len(part.encode()) <= MAX_PAYLOAD_BYTES for part in parts)

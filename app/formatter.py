@@ -179,11 +179,11 @@ def build_mesh_parts(alert, tz_name: str = "Australia/Sydney",
         parts = []
         for section in sections:
             onset = _to_local(section.onset, tz_name)
-            day = f"{onset:%a} " if onset else ""
+            day = f"{onset:%A}: " if onset else ""
             if section.phase == "CAN" or section.phenomenon.casefold() == "cancellation":
-                prefix = f"Cancellation of {alert.event} for {day}"
+                prefix = f"{day}Cancellation of {alert.event} for "
             else:
-                prefix = f"{section.phenomenon} for {day}"
+                prefix = f"{day}{section.phenomenon} for "
             areas = [area.strip() for area in re.split(r",\s*|\s+and\s+", section.areas) if area.strip()]
             current = prefix
             for area in areas:

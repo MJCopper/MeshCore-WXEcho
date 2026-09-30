@@ -315,3 +315,50 @@ def test_saving_settings_forces_meshcore_enabled():
     assert db.get_setting("meshcore_enabled") is True
     assert db.get_setting("meshcore_channel") == 3
     assert db.get_setting("meshcore_test_channel") == 5
+
+
+def test_all_warnings_disables_only_warning_product_choices():
+    import re
+
+    client, _, _ = _client({
+        "filter_include_exact": ["Marine Wind Warning", "Flood Watch"],
+        "filter_include_suffix": ["Warning"],
+    })
+    body = client.get("/settings").text
+    assert 'id="warning-products" class="warning-products is-disabled" aria-disabled="true"' in body
+    assert re.search(r'value="Marine Wind Warning" checked disabled', body)
+    assert re.search(r'value="Flood Watch" checked>', body)
+    assert "Included automatically by All BOM warning products" in body
+    assert "allWarnings.addEventListener('change', updateWarningChoices)" in body
+
+
+def test_warning_product_choices_survive_all_warnings_save():
+    client, db, _ = _client({
+        "filter_include_exact": ["Marine Wind Warning", "Flood Watch"],
+        "filter_include_suffix": ["Warning"],
+    })
+    base = {"poll_interval": "120", "display_timezone": "Australia/Sydney"}
+
+    response = client.post("/settings", data={
+        **base, "all_warnings": "on", "events": ["Road Weather Alert"]},
+        follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("filter_include_exact") == ["Marine Wind Warning", "Road Weather Alert"]
+
+    response = client.post("/settings", data={
+        **base, "events": ["Marine Wind Warning", "Road Weather Alert"]},
+        follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("filter_include_exact") == ["Marine Wind Warning", "Road Weather Alert"]
+    assert db.get_setting("filter_include_suffix") == []
+
+
+def test_javascript_submission_preserves_new_warning_choices_while_all_selected():
+    client, db, _ = _client({"filter_include_exact": ["Marine Wind Warning"]})
+    response = client.post("/settings", data={
+        "poll_interval": "120", "display_timezone": "Australia/Sydney",
+        "all_warnings": "on", "warning_choices_submitted": "1",
+        "events": ["Flood Warning", "Flood Watch"],
+    }, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("filter_include_exact") == ["Flood Warning", "Flood Watch"]

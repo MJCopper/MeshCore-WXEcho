@@ -12,6 +12,7 @@ import abc
 import asyncio
 import logging
 import math
+import secrets
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -182,7 +183,9 @@ class MeshCoreTransmitter(Transmitter):
         except Exception:
             pass
         channels = []
-        for index in range(min(8, int(device.get("max_channels") or 8))):
+        available_slots = []
+        max_channels = min(8, max(1, int(device.get("max_channels") or 8)))
+        for index in range(max_channels):
             result = await self._mc.commands.get_channel(index)
             if result.type != EventType.CHANNEL_INFO:
                 break
@@ -191,6 +194,8 @@ class MeshCoreTransmitter(Transmitter):
             if name:
                 channels.append({"index": index, "name": name,
                                  "hash": payload.get("channel_hash") or ""})
+            elif index > 0 and payload.get("channel_secret") == bytes(16):
+                available_slots.append(index)
         return {
             "name": (settings.get("name") or "").strip(),
             "model": (device.get("model") or "").strip(),
@@ -203,6 +208,8 @@ class MeshCoreTransmitter(Transmitter):
             "radio_sf": settings.get("radio_sf"),
             "radio_cr": settings.get("radio_cr"),
             "channels": channels,
+            "available_slots": available_slots,
+            "max_channels": max_channels,
         }
 
     async def set_device_name(self, name: str) -> str:
@@ -276,6 +283,72 @@ class MeshCoreTransmitter(Transmitter):
         return {"radio_freq": saved["radio_freq"], "radio_bw": saved["radio_bw"],
                 "radio_sf": sf, "radio_cr": cr}
 
+    async def add_channel(self, name: str, secret_hex: str = "") -> dict:
+        from meshcore import EventType
+
+        name = name.strip()
+        if not name or name.startswith("#") or len(name.encode("utf-8")) > 32 or any(ord(char) < 32 for char in name):
+            raise ValueError("channel name must be 1-32 UTF-8 bytes and cannot start with #")
+        if secret_hex.strip():
+            supplied = secret_hex.strip()
+            if len(supplied) != 32:
+                raise ValueError("channel key must be exactly 32 hexadecimal characters")
+            try:
+                secret = bytes.fromhex(supplied)
+            except ValueError as exc:
+                raise ValueError("channel key must be exactly 32 hexadecimal characters") from exc
+            if secret == bytes(16):
+                raise ValueError("channel key cannot be all zeros")
+            generated = False
+        else:
+            secret = secrets.token_bytes(16)
+            generated = True
+        if not self.connected:
+            raise RuntimeError("MeshCore radio is offline")
+        device = await self._mc.commands.send_device_query()
+        if device.type != EventType.DEVICE_INFO:
+            raise RuntimeError("could not read channel capacity")
+        max_channels = min(8, max(1, int((device.payload or {}).get("max_channels") or 8)))
+        slot = None
+        for index in range(1, max_channels):
+            current = await self._mc.commands.get_channel(index)
+            if current.type != EventType.CHANNEL_INFO:
+                continue
+            payload = current.payload or {}
+            if not (payload.get("channel_name") or "").strip() and payload.get("channel_secret") == bytes(16):
+                slot = index
+                break
+        if slot is None:
+            raise RuntimeError("no empty private channel slot is available")
+        result = await self._mc.commands.set_channel(slot, name, secret)
+        if result.type != EventType.OK:
+            raise RuntimeError("radio rejected the new channel")
+        verified = await self._mc.commands.get_channel(slot)
+        saved = verified.payload or {}
+        if (verified.type != EventType.CHANNEL_INFO or saved.get("channel_name") != name
+                or saved.get("channel_secret") != secret):
+            raise RuntimeError("could not verify the new channel")
+        return {"index": slot, "name": name, "secret_hex": secret.hex() if generated else ""}
+
+    async def remove_channel(self, index: int) -> None:
+        from meshcore import EventType
+
+        if not 1 <= index < 8:
+            raise ValueError("only private channel slots 1-7 can be removed")
+        if not self.connected:
+            raise RuntimeError("MeshCore radio is offline")
+        current = await self._mc.commands.get_channel(index)
+        if current.type != EventType.CHANNEL_INFO or not (current.payload or {}).get("channel_name"):
+            raise RuntimeError("channel is unavailable")
+        result = await self._mc.commands.set_channel(index, "", bytes(16))
+        if result.type != EventType.OK:
+            raise RuntimeError("radio rejected channel removal")
+        verified = await self._mc.commands.get_channel(index)
+        saved = verified.payload or {}
+        if (verified.type != EventType.CHANNEL_INFO or saved.get("channel_name")
+                or saved.get("channel_secret") != bytes(16)):
+            raise RuntimeError("could not verify channel removal")
+
     async def rename_channel(self, index: int, name: str) -> dict:
         from meshcore import EventType
 
@@ -334,6 +407,7 @@ class QueueItem:
     text: str
     delay_after: float = BURST_GAP_SECONDS
     on_result: object = None   # optional callable(ok: bool, err: str) invoked after the send
+    verification: bool = False
 
 
 def _build_transports(db) -> dict:
@@ -364,8 +438,9 @@ class TransmitManager:
     def __init__(self, db):
         self._db = db
         self._transports = _build_transports(db)
-        self._queue: deque[QueueItem] = deque(maxlen=QUEUE_MAX)        # high: weather/live
+        self._queue: deque[QueueItem] = deque(maxlen=QUEUE_MAX + 1)    # warnings plus one verification
         self._queue_event = asyncio.Event()
+        self._verification_in_flight = False
         self._lock = asyncio.Lock()
         self._worker_task: asyncio.Task | None = None
         self._connection_task: asyncio.Task | None = None
@@ -479,15 +554,38 @@ class TransmitManager:
         async with self._lock:
             return await self._saved_radio().set_radio_parameters(freq, bw, sf, cr)
 
+    async def _refresh_saved_channels(self) -> None:
+        channels = await self._saved_radio().read_channels()
+        self._db.set_setting("meshcore_channels", channels)
+        transport = self._transports["meshcore"]
+        self._db.set_setting("meshcore_channels_target",
+                             {"conn": transport.conn, "target": transport.target})
+
     async def rename_device_channel(self, index: int, name: str) -> dict:
         async with self._lock:
             renamed = await self._saved_radio().rename_channel(index, name)
-            channels = await self._saved_radio().read_channels()
-            self._db.set_setting("meshcore_channels", channels)
-            transport = self._transports["meshcore"]
-            self._db.set_setting("meshcore_channels_target",
-                                 {"conn": transport.conn, "target": transport.target})
+            await self._refresh_saved_channels()
             return renamed
+
+    async def add_device_channel(self, name: str, secret_hex: str = "") -> dict:
+        async with self._lock:
+            created = await self._saved_radio().add_channel(name, secret_hex)
+            try:
+                await self._refresh_saved_channels()
+            except Exception as exc:
+                # Do not lose the one-time generated key after a verified write.
+                created["refresh_error"] = str(exc)
+            return created
+
+    async def remove_device_channel(self, index: int) -> None:
+        async with self._lock:
+            if not 1 <= index < 8:
+                raise ValueError("only private channel slots 1-7 can be removed")
+            if index in (self._transports["meshcore"].channel,
+                         self._transports["meshcore"].test_channel):
+                raise ValueError("change the Live and Test channel selections before removing this channel")
+            await self._saved_radio().remove_channel(index)
+            await self._refresh_saved_channels()
 
     async def set_port(self, port: str) -> None:
         """Set the MeshCore serial port, then reconnect."""
@@ -533,16 +631,36 @@ class TransmitManager:
                 or "errno 16" in e or "resource temporarily unavailable" in e)
 
     # ---- sending --------------------------------------------------------
+    def enqueue_verification(self, text: str, on_result=None,
+                             allow_new: bool = True) -> bool:
+        """Keep one verification item at the end of the live warning queue."""
+        pending = next((item for item in self._queue if item.verification), None)
+        if pending is not None:
+            self._queue.remove(pending)
+            self._queue.append(pending)
+            return True
+        if self._verification_in_flight or not allow_new or len(self._queue) == self._queue.maxlen:
+            return False
+        self._queue.append(QueueItem(text=text, delay_after=BURST_GAP_SECONDS,
+                                     on_result=on_result, verification=True))
+        self._queue_event.set()
+        return True
+
     def enqueue(self, text: str, channel: int | None = None, on_result=None,
                 delay_after: float = BURST_GAP_SECONDS) -> bool:
         """Queue a BOM warning for the live channel. on_result(ok, err)
         fires after the send with the REAL verified outcome."""
-        dropped = len(self._queue) == self._queue.maxlen
+        pending = next((item for item in self._queue if item.verification), None)
+        if pending is not None:
+            self._queue.remove(pending)
+        dropped = len(self._queue) >= QUEUE_MAX
         if dropped:
-            oldest = self._queue[0] if self._queue else None
-            if oldest is not None and oldest.on_result is not None:
+            oldest = self._queue.popleft()
+            if oldest.on_result is not None:
                 self._safe_result(oldest.on_result, False, "dropped (queue full)")
         self._queue.append(QueueItem(text=text, delay_after=max(0.0, float(delay_after)), on_result=on_result))
+        if pending is not None and len(self._queue) < self._queue.maxlen:
+            self._queue.append(pending)
         self._queue_event.set()
         if dropped:
             logger.warning("transmit queue full; dropped oldest")
@@ -777,6 +895,8 @@ class TransmitManager:
                     return
                 continue
             item = self._queue.popleft()
+            if item.verification:
+                self._verification_in_flight = True
             try:
                 ok, err = await self._transmit_item(item)
                 if item.on_result is not None:
@@ -788,6 +908,9 @@ class TransmitManager:
                 # kill the worker -- that would silently stop ALL future broadcasts.
                 logger.exception("transmit worker iteration error")
                 ok = False
+            finally:
+                if item.verification:
+                    self._verification_in_flight = False
             if self._queue and item.delay_after > 0:
                 try:
                     await asyncio.sleep(item.delay_after)

@@ -64,7 +64,7 @@ python -m venv .venv
 
 The application uses BOM's public state-based warning RSS feeds, including the warning link and product identifier supplied by BOM. RSS items are normalized into provider-neutral alerts before filtering and deduplication. BOM's feed documentation notes that RSS should not be the sole source of warning information and requires links back to the full BOM warning product.
 
-Recent warning revisions and BOM History record each distinct version received from the selected feeds, including warnings excluded by broadcast filters. An unchanged warning is not added again on every poll. The Events log records each dry-run attempt, so it can grow while History stays the same.
+Recent warning revisions and BOM History record each distinct version received from the selected feeds, including warnings excluded by broadcast filters. An unchanged warning is not added again on every poll. The Events log records each dry-run attempt, so it can grow while History stays the same. The unofficial verification message is queued after warning parts and sent at most once per five minutes on the live channel; its last successful send time survives restarts. Dry-run shows the same five-minute cadence.
 
 The default broadcast policy includes all BOM warning products. Settings can instead select individual Australian warning products, plus additional products such as Flood Watch, Tropical Cyclone Advice, Road Weather Alert and Bush Walkers Weather Alert. Timestamped RSS titles and `Marine Wind Warning Summary` items are normalized before filtering; qualified flood products and numbered tropical cyclone products match their corresponding product selection. For marine wind warnings whose RSS item contains only a statewide summary, WXEcho resolves the linked BOM product ID and reads the warning detail API. Strong Wind Warning areas and cancellations are sent as separately labelled parts. If detail is unavailable, it falls back to the RSS summary.
 
@@ -81,7 +81,7 @@ WXEcho retries a saved but disconnected radio in the background about every 15 s
 
 ### Companion settings
 
-The MeshCore Settings page reads the saved radio's name, firmware, battery, TX power, radio parameters and configured channels from the connected companion. When the radio is connected, you can edit its name, TX power, frequency, bandwidth, spreading factor, coding rate and existing channel names. Channel renaming preserves the channel keys. Saved values are read back from the radio; model, firmware, battery, keys and PINs are not editable on this page. The page is intended for a trusted network and does not have a separate device-write switch.
+The MeshCore Settings page reads the saved radio's name, firmware, battery, TX power, radio parameters and configured channels from the connected companion. When the radio is connected, you can edit its name, TX power, frequency, bandwidth, spreading factor, coding rate and existing channel names. You can add a private channel in an empty slot with a supplied 16-byte key or a generated key, and remove an unused private channel. A generated key appears only on the creation response so it can be shared with other devices. The public slot and any slot selected as Live or Test cannot be removed. Channel renaming preserves the channel keys. Saved values are read back from the radio; model, firmware, battery and PINs are not editable on this page. The page is intended for a trusted network and does not have a separate device-write switch.
 
 ## License
 

@@ -11,6 +11,13 @@ class _FakeDb:
         self.history_rows = []
         self.events = []
         self.errors = []
+        self.settings = {}
+
+    def get_setting(self, key, default=None):
+        return self.settings.get(key, default)
+
+    def set_setting(self, key, value):
+        self.settings[key] = value
 
     def get_state(self, alert_id):
         return None
@@ -39,6 +46,12 @@ class _FakeDb:
         )
         return row_id
 
+    def refresh_dry_run_history_text(self, history_id, transmitted_text):
+        for row in self.history_rows:
+            if row["id"] == history_id and row["transmit_status"] == "dry-run":
+                row["transmitted_text"] = transmitted_text
+                return
+
     def update_history_transmit_status(self, history_id, transmit_status, detail=None):
         for row in self.history_rows:
             if row["id"] == history_id:
@@ -60,6 +73,17 @@ class _FakeDb:
 class _FakeTx:
     def __init__(self):
         self.enqueued = []
+
+    def enqueue_verification(self, text, on_result=None, allow_new=True):
+        pending = next((x for x in self.enqueued if x["text"] == text), None)
+        if pending:
+            self.enqueued.remove(pending)
+            self.enqueued.append(pending)
+            return True
+        if not allow_new:
+            return False
+        self.enqueue(text, on_result=on_result)
+        return True
 
     def enqueue(self, text, channel=None, on_result=None, delay_after=None):
         self.enqueued.append(
@@ -96,17 +120,9 @@ async def test_poller_queues_parts_then_final_verification_with_expected_delays(
 
     await poller._process(_warning_item(), rules, "Australia/Sydney", 0, dry_run=False)
 
-    assert [m["text"] for m in tx.enqueued] == [
-        "1/2 first",
-        "2/2 second",
-        FINAL_VERIFICATION_MESSAGE,
-    ]
+    assert [m["text"] for m in tx.enqueued] == ["1/2 first", "2/2 second"]
     assert tx.enqueued[0]["delay_after"] == MULTIPART_GAP_SECONDS
-    assert tx.enqueued[1]["delay_after"] == MULTIPART_GAP_SECONDS
-    assert tx.enqueued[2]["delay_after"] == BURST_GAP_SECONDS
-    assert tx.enqueued[2]["text"] == FINAL_VERIFICATION_MESSAGE
-    assert not tx.enqueued[2]["text"].startswith("1/2")
-    assert "1/" not in tx.enqueued[2]["text"]
+    assert tx.enqueued[1]["delay_after"] == BURST_GAP_SECONDS
     assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) <= 195
 
 
@@ -130,11 +146,9 @@ async def test_poller_cancellation_also_queues_final_verification(monkeypatch):
 
     await poller._process(item, rules, "Australia/Sydney", 0, dry_run=False)
 
-    assert len(tx.enqueued) == 2
+    assert len(tx.enqueued) == 1
     assert tx.enqueued[0]["text"].startswith("CANCELLED:")
-    assert tx.enqueued[-1]["text"] == FINAL_VERIFICATION_MESSAGE
-    assert tx.enqueued[0]["delay_after"] == MULTIPART_GAP_SECONDS
-    assert tx.enqueued[1]["delay_after"] == BURST_GAP_SECONDS
+    assert tx.enqueued[0]["delay_after"] == BURST_GAP_SECONDS
 
 
 @pytest.mark.asyncio
@@ -148,7 +162,7 @@ async def test_poller_records_state_only_after_all_multipart_parts_succeed(monke
 
     await poller._process(_warning_item(), rules, "Australia/Sydney", 0, dry_run=False)
 
-    assert len(tx.enqueued) == 3
+    assert len(tx.enqueued) == 2
     assert db.state_rows == []
     assert db.history_rows[0]["transmit_status"] == "queued"
 
@@ -156,9 +170,6 @@ async def test_poller_records_state_only_after_all_multipart_parts_succeed(monke
     assert db.state_rows == []
 
     tx.enqueued[1]["on_result"](True, "")
-    assert db.state_rows == []
-
-    tx.enqueued[2]["on_result"](True, "")
     assert len(db.state_rows) == 1
     assert db.history_rows[0]["transmit_status"] == "success"
 
@@ -178,15 +189,14 @@ async def test_poller_does_not_record_state_when_any_multipart_part_fails(monkey
     await poller._process(item, rules, "Australia/Sydney", 0, dry_run=False)
 
     tx.enqueued[0]["on_result"](True, "")
-    tx.enqueued[1]["on_result"](True, "")
-    tx.enqueued[2]["on_result"](False, "link down")
+    tx.enqueued[1]["on_result"](False, "link down")
 
     assert db.state_rows == []
     assert db.history_rows[0]["transmit_status"] == "failed"
     assert "broadcast failed: link down" in db.history_rows[0]["detail"]
     assert poller.status.last_broadcast_failure is not None
     assert "NOT SENT on MeshCore" in db.errors[-1][1]
-    assert FINAL_VERIFICATION_MESSAGE in db.errors[-1][1]
+    assert "1/2 first" in db.errors[-1][1]
 
 
 @pytest.mark.asyncio
@@ -201,13 +211,12 @@ async def test_poller_dry_run_logs_history_and_events_with_final_verification(mo
     await poller._process(_warning_item("dry-1"), rules, "Australia/Sydney", 0, dry_run=True)
 
     assert tx.enqueued == []
-    assert len(db.events) == 3
+    assert len(db.events) == 2
     assert db.events[0][1] == "[DRY-RUN] would send: 1/2 first"
     assert db.events[1][1] == "[DRY-RUN] would send: 2/2 second"
-    assert db.events[2][1] == f"[DRY-RUN] would send: {FINAL_VERIFICATION_MESSAGE}"
     assert len(db.history_rows) == 1
     assert db.history_rows[0]["transmitted_text"] == (
-        f"1/2 first || 2/2 second || {FINAL_VERIFICATION_MESSAGE}"
+        "1/2 first || 2/2 second"
     )
     assert db.history_rows[0]["detail"].startswith("DRY-RUN:")
     assert db.history_rows[0]["transmit_status"] == "dry-run"
@@ -229,7 +238,7 @@ async def test_dry_run_alert_is_queued_when_broadcasting_goes_live(monkeypatch):
     assert len(db.history_rows) == 1
     assert db.history_rows[0]["transmit_status"] == "queued"
     assert db.history_rows[0]["detail"] == "new alert"
-    assert len(tx.enqueued) == 2
+    assert len(tx.enqueued) == 1
 
 
 @pytest.mark.asyncio
@@ -269,9 +278,7 @@ async def test_delivery_callback_updates_only_its_history_revision(monkeypatch):
     await poller._process(second, rules, "Australia/Sydney", 0, dry_run=False)
     second_callback = tx.enqueued[-1]["on_result"]
     second_callback(True, "")
-    second_callback(True, "")
     first_callback(False, "old send failed")
-    first_callback(True, "")
 
     assert len(db.history_rows) == 2
     assert db.history_rows[0]["transmit_status"] == "failed"
@@ -314,3 +321,82 @@ async def test_marine_api_area_change_is_new_revision_without_rss_change(monkeyp
     assert "Cancellation of Marine Wind Warning" in db.history_rows[1]["transmitted_text"]
     assert "Batemans Coast" in db.history_rows[1]["transmitted_text"]
     assert tx.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_existing_dry_run_revision_refreshes_prepared_wording(monkeypatch):
+    db = _FakeDb()
+    tx = _FakeTx()
+    poller = BomPoller(db, tx)
+    rules = FilterRules(include_exact=[], include_suffix=["Warning"], exclude_exact=[])
+    item = _warning_item("same-revision")
+    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz: ["Wed: warning"])
+    await poller._process(item, rules, "Australia/Sydney", 0, dry_run=True)
+    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz: ["Wednesday: warning"])
+    await poller._process(item, rules, "Australia/Sydney", 0, dry_run=True)
+
+    assert len(db.history_rows) == 1
+    assert db.history_rows[0]["transmitted_text"].startswith("Wednesday: warning")
+
+
+def test_verification_success_starts_persistent_five_minute_cooldown():
+    db = _FakeDb()
+    tx = _FakeTx()
+    BomPoller(db, tx)._queue_verification(0, dry_run=False)
+    assert [item["text"] for item in tx.enqueued] == [FINAL_VERIFICATION_MESSAGE]
+    tx.enqueued.pop()["on_result"](True, "")
+
+    restarted = BomPoller(db, tx)
+    restarted._queue_verification(0, dry_run=False)
+    assert tx.enqueued == []
+    assert db.get_setting("verification_live_last_ts")["0"]
+
+
+def test_verification_failure_does_not_start_cooldown():
+    db = _FakeDb()
+    tx = _FakeTx()
+    poller = BomPoller(db, tx)
+    poller._queue_verification(0, dry_run=False)
+    tx.enqueued.pop()["on_result"](False, "radio unavailable")
+    assert db.get_setting("verification_live_last_ts") is None
+    poller._queue_verification(0, dry_run=False)
+    assert [item["text"] for item in tx.enqueued] == [FINAL_VERIFICATION_MESSAGE]
+    assert "verification message failed" in db.errors[-1][1]
+
+
+def test_dry_run_verification_appears_once_in_five_minutes():
+    db = _FakeDb()
+    poller = BomPoller(db, _FakeTx())
+    poller._queue_verification(0, dry_run=True)
+    poller._queue_verification(0, dry_run=True)
+    assert [message for _, message in db.events] == [
+        f"[DRY-RUN] would send: {FINAL_VERIFICATION_MESSAGE}"]
+    assert db.get_setting("verification_dry_run_last_ts")["0"]
+
+
+def test_verification_is_due_again_after_five_minutes():
+    from datetime import datetime, timedelta, timezone
+
+    db = _FakeDb()
+    old = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
+    db.set_setting("verification_live_last_ts", {"0": old})
+    tx = _FakeTx()
+    BomPoller(db, tx)._queue_verification(0, dry_run=False)
+    assert [item["text"] for item in tx.enqueued] == [FINAL_VERIFICATION_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_verification_failure_does_not_change_successful_warning_history(monkeypatch):
+    db = _FakeDb()
+    tx = _FakeTx()
+    poller = BomPoller(db, tx)
+    rules = FilterRules(include_exact=[], include_suffix=["Warning"], exclude_exact=[])
+    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz: ["warning"])
+    await poller._process(_warning_item("verified-warning"), rules,
+                          "Australia/Sydney", 0, dry_run=False)
+    poller._queue_verification(0, dry_run=False)
+    tx.enqueued[0]["on_result"](True, "")
+    tx.enqueued[1]["on_result"](False, "radio unavailable")
+    assert db.history_rows[0]["transmit_status"] == "success"
+    assert len(db.state_rows) == 1
+    assert "verification message failed" in db.errors[-1][1]

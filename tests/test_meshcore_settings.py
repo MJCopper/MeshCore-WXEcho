@@ -438,3 +438,288 @@ def test_legacy_disabled_setting_does_not_disable_meshcore():
             return {"meshcore_enabled": False}.get(key, default)
 
     assert TransmitManager(Database()).status()[0]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_private_channel_uses_first_empty_slot_and_verifies_key(monkeypatch):
+    class Commands:
+        slots = {
+            0: ("Public", b"p" * 16),
+            1: ("", bytes(16)),
+            2: ("Existing", b"e" * 16),
+        }
+        writes = []
+
+        async def send_device_query(self):
+            return SimpleNamespace(type=EventType.DEVICE_INFO, payload={"max_channels": 3})
+
+        async def get_channel(self, index):
+            name, secret = self.slots[index]
+            return SimpleNamespace(type=EventType.CHANNEL_INFO, payload={
+                "channel_name": name, "channel_secret": secret,
+            })
+
+        async def set_channel(self, index, name, secret):
+            self.writes.append((index, name, secret))
+            self.slots[index] = (name, secret)
+            return SimpleNamespace(type=EventType.OK)
+
+    commands = Commands()
+    transmitter = MeshCoreTransmitter("serial")
+    transmitter._mc = SimpleNamespace(is_connected=True, commands=commands)
+    monkeypatch.setattr("app.transmit.secrets.token_bytes", lambda count: b"g" * count)
+
+    created = await transmitter.add_channel("Weather")
+    assert created == {"index": 1, "name": "Weather", "secret_hex": (b"g" * 16).hex()}
+    assert commands.writes == [(1, "Weather", b"g" * 16)]
+    with pytest.raises(RuntimeError, match="no empty private"):
+        await transmitter.add_channel("Another")
+
+
+@pytest.mark.asyncio
+async def test_add_channel_accepts_existing_key_and_rejects_invalid_key():
+    class Commands:
+        async def send_device_query(self):
+            return SimpleNamespace(type=EventType.DEVICE_INFO, payload={"max_channels": 2})
+
+        async def get_channel(self, index):
+            return SimpleNamespace(type=EventType.CHANNEL_INFO, payload={
+                "channel_name": "Public" if index == 0 else self.name,
+                "channel_secret": b"p" * 16 if index == 0 else self.secret,
+            })
+
+        async def set_channel(self, index, name, secret):
+            self.name, self.secret = name, secret
+            return SimpleNamespace(type=EventType.OK)
+
+        name = ""
+        secret = bytes(16)
+
+    transmitter = MeshCoreTransmitter("serial")
+    commands = Commands()
+    transmitter._mc = SimpleNamespace(is_connected=True, commands=commands)
+    with pytest.raises(ValueError, match="32 hexadecimal"):
+        await transmitter.add_channel("Weather", "not-a-key")
+    with pytest.raises(ValueError, match="all zeros"):
+        await transmitter.add_channel("Weather", "00" * 16)
+    assert commands.name == ""
+    result = await transmitter.add_channel("Weather", "ab" * 16)
+    assert result == {"index": 1, "name": "Weather", "secret_hex": ""}
+    assert commands.secret == bytes.fromhex("ab" * 16)
+
+
+@pytest.mark.asyncio
+async def test_remove_channel_clears_secret_and_protects_public_slot():
+    class Commands:
+        name = "Weather"
+        secret = b"w" * 16
+        calls = []
+
+        async def get_channel(self, index):
+            return SimpleNamespace(type=EventType.CHANNEL_INFO, payload={
+                "channel_name": self.name, "channel_secret": self.secret,
+            })
+
+        async def set_channel(self, index, name, secret):
+            self.calls.append((index, name, secret))
+            self.name, self.secret = name, secret
+            return SimpleNamespace(type=EventType.OK)
+
+    commands = Commands()
+    transmitter = MeshCoreTransmitter("serial")
+    transmitter._mc = SimpleNamespace(is_connected=True, commands=commands)
+    with pytest.raises(ValueError, match="slots 1-7"):
+        await transmitter.remove_channel(0)
+    await transmitter.remove_channel(2)
+    assert commands.calls == [(2, "", bytes(16))]
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await transmitter.remove_channel(2)
+
+
+@pytest.mark.asyncio
+async def test_manager_blocks_removal_of_live_or_test_channel():
+    class Database:
+        def get_setting(self, key, default=None):
+            return {"meshcore_channel": 2, "meshcore_test_channel": 3}.get(key, default)
+
+    class Radio:
+        connected = True
+        calls = []
+
+        async def remove_channel(self, index):
+            self.calls.append(index)
+
+    tx = TransmitManager(Database())
+    transport = tx._transports["meshcore"]
+    transport.target = "/dev/ttyUSB0"
+    transport.connected = True
+    transport.tx = Radio()
+    for index in (0, 2, 3):
+        with pytest.raises(ValueError):
+            await tx.remove_device_channel(index)
+    assert transport.tx.calls == []
+
+
+def test_channel_management_page_and_generated_key_response():
+    client, radio = _web_client()
+
+    async def settings():
+        return {"name": "Weather node", "model": "Companion", "firmware": "1.4",
+                "battery_mv": None, "radio_freq": None, "radio_bw": None,
+                "radio_sf": None, "radio_cr": None, "tx_power": None,
+                "max_tx_power": None, "available_slots": [1, 2],
+                "channels": [{"index": 0, "name": "Public", "hash": "ab"},
+                             {"index": 3, "name": "Ops", "hash": "cd"}]}
+
+    async def add(name, secret_hex):
+        radio.calls.append(("add", name, secret_hex))
+        return {"index": 1, "name": name, "secret_hex": "ab" * 16}
+
+    async def remove(index):
+        radio.calls.append(("remove", index))
+
+    radio.get_device_settings = settings
+    radio.add_device_channel = add
+    radio.remove_device_channel = remove
+    page = client.get("/meshcore/settings")
+    assert 'action="/meshcore/settings/channels/add"' in page.text
+    assert 'action="/meshcore/settings/channel/3/remove"' in page.text
+    assert 'action="/meshcore/settings/channel/0/remove"' not in page.text
+    assert "ab" * 16 not in page.text
+
+    created = client.post("/meshcore/settings/channels/add",
+                          data={"name": "Weather", "secret_hex": ""})
+    assert created.status_code == 200
+    assert "ab" * 16 in created.text
+    assert created.headers["cache-control"] == "no-store"
+    assert "ab" * 16 not in client.get("/meshcore/settings").text
+    removed = client.post("/meshcore/settings/channel/3/remove", follow_redirects=False)
+    assert removed.status_code == 303
+    assert radio.calls == [("add", "Weather", ""), ("remove", 3)]
+
+
+def test_channel_management_errors_are_rendered():
+    client, radio = _web_client()
+
+    async def invalid(name, secret_hex):
+        raise ValueError("channel key must be exactly 32 hexadecimal characters")
+
+    radio.add_device_channel = invalid
+    response = client.post("/meshcore/settings/channels/add",
+                           data={"name": "Weather", "secret_hex": "wrong"})
+    assert response.status_code == 400
+    assert "channel key must be exactly 32 hexadecimal characters" in response.text
+
+
+@pytest.mark.asyncio
+async def test_channel_snapshot_identifies_only_verified_empty_private_slots():
+    class Commands:
+        async def send_device_query(self):
+            return SimpleNamespace(type=EventType.DEVICE_INFO, payload={"max_channels": 4})
+
+        async def send_appstart(self):
+            return SimpleNamespace(type=EventType.SELF_INFO, payload={})
+
+        async def get_bat(self):
+            return SimpleNamespace(type=EventType.ERROR)
+
+        async def get_channel(self, index):
+            names = ["Public", "", "Old", ""]
+            secrets = [b"p" * 16, bytes(16), b"o" * 16, b"z" * 16]
+            return SimpleNamespace(type=EventType.CHANNEL_INFO, payload={
+                "channel_name": names[index], "channel_secret": secrets[index],
+            })
+
+    transmitter = MeshCoreTransmitter("serial")
+    transmitter._mc = SimpleNamespace(is_connected=True, commands=Commands())
+    snapshot = await transmitter.read_settings()
+    assert snapshot["max_channels"] == 4
+    assert snapshot["available_slots"] == [1]
+    assert [channel["index"] for channel in snapshot["channels"]] == [0, 2]
+
+
+@pytest.mark.asyncio
+async def test_channel_add_rejects_failed_readback():
+    class Commands:
+        async def send_device_query(self):
+            return SimpleNamespace(type=EventType.DEVICE_INFO, payload={"max_channels": 2})
+
+        async def get_channel(self, index):
+            return SimpleNamespace(type=EventType.CHANNEL_INFO, payload={
+                "channel_name": "Public" if index == 0 else "",
+                "channel_secret": b"p" * 16 if index == 0 else bytes(16),
+            })
+
+        async def set_channel(self, index, name, secret):
+            return SimpleNamespace(type=EventType.OK)
+
+    transmitter = MeshCoreTransmitter("serial")
+    transmitter._mc = SimpleNamespace(is_connected=True, commands=Commands())
+    with pytest.raises(RuntimeError, match="verify"):
+        await transmitter.add_channel("Weather", "ab" * 16)
+
+
+@pytest.mark.asyncio
+async def test_channel_add_and_remove_refresh_saved_dropdown_names():
+    class Database:
+        def __init__(self):
+            self.settings = {"meshcore_channel": 0, "meshcore_test_channel": 1}
+
+        def get_setting(self, key, default=None):
+            return self.settings.get(key, default)
+
+        def set_setting(self, key, value):
+            self.settings[key] = value
+
+    class Radio:
+        connected = True
+        channels = []
+
+        async def add_channel(self, name, secret_hex):
+            self.channels = [{"index": 2, "name": name}]
+            return {"index": 2, "name": name, "secret_hex": "ab" * 16}
+
+        async def remove_channel(self, index):
+            self.channels = []
+
+        async def read_channels(self):
+            return self.channels
+
+    db = Database()
+    tx = TransmitManager(db)
+    transport = tx._transports["meshcore"]
+    transport.target = "/dev/ttyUSB0"
+    transport.connected = True
+    transport.tx = Radio()
+    created = await tx.add_device_channel("Weather")
+    assert created["secret_hex"] == "ab" * 16
+    assert db.settings["meshcore_channels"] == [{"index": 2, "name": "Weather"}]
+    await tx.remove_device_channel(2)
+    assert db.settings["meshcore_channels"] == []
+    assert db.settings["meshcore_channel"] == 0
+    assert db.settings["meshcore_test_channel"] == 1
+
+
+@pytest.mark.asyncio
+async def test_generated_key_survives_cache_refresh_failure():
+    class Database:
+        def get_setting(self, key, default=None):
+            return default
+
+    class Radio:
+        connected = True
+
+        async def add_channel(self, name, secret_hex):
+            return {"index": 2, "name": name, "secret_hex": "ab" * 16}
+
+        async def read_channels(self):
+            raise RuntimeError("temporary read failure")
+
+    tx = TransmitManager(Database())
+    transport = tx._transports["meshcore"]
+    transport.target = "/dev/ttyUSB0"
+    transport.connected = True
+    transport.tx = Radio()
+    created = await tx.add_device_channel("Weather")
+    assert created["secret_hex"] == "ab" * 16
+    assert created["refresh_error"] == "temporary read failure"

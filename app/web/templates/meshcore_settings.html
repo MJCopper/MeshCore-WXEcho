@@ -7,6 +7,15 @@
 </div>
 {% if saved_label %}<p class="hint">{{ saved_label }} saved on the radio.</p>{% endif %}
 {% if error %}<div class="panel"><p>{{ error }}</p></div>{% endif %}
+{% if created_channel %}
+  <div class="panel">
+    <h3>Channel {{ created_channel.index }} added: {{ created_channel.name }}</h3>
+    {% if created_channel.secret_hex %}
+      <p>Copy this private channel key now. It is shown only on this response and is needed on other devices joining the channel.</p>
+      <div class="rec-msg">{{ created_channel.secret_hex }}</div>
+    {% else %}<p class="hint">The supplied channel key was saved on the companion.</p>{% endif %}
+  </div>
+{% endif %}
 {% if device %}
   <section class="panel">
     <h3>Companion radio</h3>
@@ -56,7 +65,25 @@
           <div><button type="submit">Save name</button></div>
         </div>
       </form>
+      {% if channel.index > 0 %}
+        <form method="post" action="/meshcore/settings/channel/{{ channel.index }}/remove" onsubmit="return confirm('Remove channel {{ channel.index }} from this companion? Other devices will keep their copy.');">
+          {% set in_use = channel.index == live_channel or channel.index == test_channel %}
+          <button type="submit" class="secondary" {% if in_use %}disabled{% endif %}>Remove channel {{ channel.index }}</button>
+          {% if in_use %}<span class="hint">Change the Live or Test channel in Settings before removing this channel.</span>{% endif %}
+        </form>
+      {% endif %}
     {% else %}<p class="hint">No configured channels reported.</p>{% endfor %}
+    {% if device.available_slots %}
+      <form method="post" action="/meshcore/settings/channels/add" autocomplete="off">
+        <h4>Add private channel</h4>
+        <p class="hint">Uses the first empty private slot. Leave the key blank to generate a new one, or enter the 32-character hexadecimal key of an existing channel. If that slot is already selected as Live or Test in Settings, the new channel will take that role.</p>
+        <label for="new-channel-name">Channel name</label>
+        <input id="new-channel-name" name="name" maxlength="32" required>
+        <label for="new-channel-key">Existing channel key (optional)</label>
+        <input id="new-channel-key" name="secret_hex" pattern="[0-9a-fA-F]{32}" maxlength="32" spellcheck="false" placeholder="Leave blank to generate a new key">
+        <button type="submit" style="margin-top:12px;">Add channel</button>
+      </form>
+    {% else %}<p class="hint">No empty private channel slots are available.</p>{% endif %}
   </section>
 {% endif %}
 {% endblock %}

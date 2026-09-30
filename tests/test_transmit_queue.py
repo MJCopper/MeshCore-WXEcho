@@ -129,3 +129,27 @@ async def test_idle_radio_detects_disconnection(monkeypatch):
     await asyncio.wait_for(tx._maintain_connections(), timeout=1)
 
     assert recovered == [transport.target]
+
+
+def test_verification_stays_once_at_tail_when_more_warnings_arrive():
+    tx = TransmitManager(_FakeDb())
+    tx.enqueue("warning-1")
+    assert tx.enqueue_verification("verification") is True
+    tx.enqueue("warning-2")
+    assert tx.enqueue_verification("verification") is True
+    assert [item.text for item in tx._queue] == ["warning-1", "warning-2", "verification"]
+    assert sum(item.verification for item in tx._queue) == 1
+
+
+def test_verification_has_reserved_place_after_full_warning_queue():
+    tx = TransmitManager(_FakeDb())
+    warning_limit = tx._queue.maxlen - 1
+    for number in range(warning_limit):
+        tx.enqueue(f"warning-{number}")
+    assert tx.enqueue_verification("verification") is True
+    assert len(tx._queue) == warning_limit + 1
+    tx.enqueue("new-warning")
+    assert len(tx._queue) == warning_limit + 1
+    assert tx._queue[-1].text == "verification"
+    assert tx._queue[0].text == "warning-1"
+    assert tx._queue[-2].text == "new-warning"

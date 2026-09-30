@@ -242,6 +242,16 @@ class Database:
                 "ORDER BY id DESC LIMIT 1", (alert_id,),
             ).fetchone()
 
+    def refresh_dry_run_history_text(self, history_id: int, transmitted_text: str) -> None:
+        """Refresh a prepared preview while keeping its original revision row."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE history SET transmitted_text = ? WHERE id = ? "
+                "AND transmit_status = 'dry-run'",
+                (transmitted_text, history_id),
+            )
+            self._conn.commit()
+
     def update_history_transmit_status(
         self, history_id: int, transmit_status: str, detail: Optional[str] = None,
     ) -> None:

@@ -63,6 +63,9 @@ async def test_fixed_link_revisions_reach_history_and_dashboard(tmp_path, monkey
     await poller.poll_once()
     assert len(db.query_history()) == 1
     await poller.poll_once()
+    footers = [row["message"] for row in db.recent_events(100)
+               if "[DRY-RUN] would send: UNOFFICIAL automated relay" in row["message"]]
+    assert len(footers) == 1
     rows = db.query_history()
     assert len(rows) == 2
     assert rows[0]["alert_id"] == rows[1]["alert_id"]
@@ -81,6 +84,33 @@ async def test_fixed_link_revisions_reach_history_and_dashboard(tmp_path, monkey
     assert history.text.count('class="rec"') == 2
     assert "Unchanged polls do not add entries" in history.text
     assert dashboard.status_code == 200
-    assert "Recent warning revisions" in dashboard.text
-    assert dashboard.text.count('class="arow"') == 2
+    assert "Recent alerts" in dashboard.text
+    assert "Latest recorded revision of each alert" in dashboard.text
+    assert dashboard.text.count('class="arow"') == 1
+    assert "Earlier revision" in history.text
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_verification_follows_all_alerts_in_poll(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "batch.db"))
+    poller = BomPoller(db, _Radio())
+
+    class _BOMClient:
+        last_errors = []
+        last_server_date = None
+
+        async def fetch_active(self, regions, districts=None):
+            return [
+                {"id": "one", "event": "Flood Warning", "headline": "one", "area_desc": "Hunter"},
+                {"id": "two", "event": "Flood Warning", "headline": "two", "area_desc": "Sydney"},
+            ], "<rss/>"
+
+    monkeypatch.setattr("app.poller.BOMClient", _BOMClient)
+    await poller.poll_once()
+    messages = [row["message"] for row in reversed(db.recent_events(10))]
+    assert len(messages) == 3
+    assert "Hunter" in messages[0]
+    assert "Sydney" in messages[1]
+    assert "UNOFFICIAL automated relay" in messages[2]
     db.close()

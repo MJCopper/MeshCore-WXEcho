@@ -20,9 +20,13 @@
     <label class="chk"><input type="checkbox" name="all_warnings" {% if all_warnings %}checked{% endif %}> <b>All BOM warning products</b></label>
     <p class="hint">Select individual warning products only when the all-warnings option is off. Watches, advice and alerts are always selected separately.</p>
     {% for group, group_events in event_groups.items() %}
-      <div class="grp-title">{{ group }}</div>
-      <div class="checkgrid">
-        {% for ev in group_events %}<label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}> {{ ev }}</label>{% endfor %}
+      {% set warning_group = group == 'Warning products' %}
+      <div {% if warning_group %}id="warning-products" class="warning-products{% if all_warnings %} is-disabled{% endif %}" aria-disabled="{{ 'true' if all_warnings else 'false' }}"{% endif %}>
+        <div class="grp-title">{{ group }}</div>
+        {% if warning_group %}<p class="hint warning-products-note">Included automatically by All BOM warning products. Your individual choices are saved for later.</p>{% endif %}
+        <div class="checkgrid">
+          {% for ev in group_events %}<label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}{% if warning_group and all_warnings %} disabled{% endif %}> {{ ev }}</label>{% endfor %}
+        </div>
       </div>
     {% endfor %}
   </div>
@@ -60,6 +64,34 @@
 
   <button type="submit">Save settings</button>
 </form>
+
+<script>
+(function () {
+  const allWarnings = document.querySelector('[name="all_warnings"]');
+  const warningGroup = document.getElementById('warning-products');
+  const boxes = warningGroup.querySelectorAll('[name="events"]');
+  const form = allWarnings.closest('form');
+
+  function updateWarningChoices() {
+    const disabled = allWarnings.checked;
+    warningGroup.classList.toggle('is-disabled', disabled);
+    warningGroup.setAttribute('aria-disabled', String(disabled));
+    boxes.forEach(box => { box.disabled = disabled; });
+  }
+
+  allWarnings.addEventListener('change', updateWarningChoices);
+  form.addEventListener('submit', () => {
+    if (!allWarnings.checked) return;
+    boxes.forEach(box => { if (box.checked) box.disabled = false; });
+    const marker = document.createElement('input');
+    marker.type = 'hidden';
+    marker.name = 'warning_choices_submitted';
+    marker.value = '1';
+    form.appendChild(marker);
+  });
+  updateWarningChoices();
+})();
+</script>
 
 <script>
 (function () {

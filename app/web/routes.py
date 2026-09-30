@@ -136,11 +136,22 @@ def _dash_ctx(request) -> dict:
     include = list(db.get_setting("filter_include_exact", []) or [])
     if db.get_setting("filter_include_suffix", []):
         include = ["All Warnings"] + include
+    recent_rows = []
+    seen_alert_ids = set()
+    for r in db.query_history(limit=200):
+        alert_id = r["alert_id"] if "alert_id" in r.keys() else None
+        if alert_id and alert_id in seen_alert_ids:
+            continue
+        if alert_id:
+            seen_alert_ids.add(alert_id)
+        recent_rows.append(r)
+        if len(recent_rows) == 6:
+            break
     recent = [{
         "event": r["event"], "area": r["area"], "disposition": r["disposition"],
         "transmit_status": r["transmit_status"], "detail": r["detail"],
         "text": r["transmitted_text"], "when": fmt_local(r["ts"], tz),
-    } for r in db.query_history(limit=6)]
+    } for r in recent_rows]
     ltx = db.query_transmit_log(limit=1)
     last_tx = "-"
     if ltx:
@@ -251,6 +262,21 @@ async def toggle_dry_run(request: Request):
 
 
 # ---- history -----------------------------------------------------------
+def _superseded_history_ids(rows):
+    """Flag older versions of the same BOM item in the visible History page."""
+    seen = set()
+    superseded = set()
+    for row in rows:
+        if "alert_id" not in row.keys() or "id" not in row.keys():
+            continue
+        alert_id = row["alert_id"]
+        if alert_id in seen:
+            superseded.add(row["id"])
+        else:
+            seen.add(alert_id)
+    return superseded
+
+
 @router.get("/history", response_class=HTMLResponse)
 async def history(request: Request, disposition: str = "", transmit_status: str = "",
                   date_from: str = "", date_to: str = ""):
@@ -261,7 +287,7 @@ async def history(request: Request, disposition: str = "", transmit_status: str 
         date_to=date_to or None,
     )
     return render(
-        request, "history.html", rows=rows, disposition=disposition,
+        request, "history.html", rows=rows, superseded_ids=_superseded_history_ids(rows), disposition=disposition,
         transmit_status=transmit_status, date_from=date_from, date_to=date_to,
         dispositions=["sent", "filtered", "update", "cancelled"],
         transmit_statuses=["queued", "success", "failed", "dry-run"],
@@ -278,7 +304,8 @@ async def history_partial(request: Request, disposition: str = "", transmit_stat
         date_from=date_from or None,
         date_to=date_to or None,
     )
-    return render(request, "_history_rows.html", rows=rows)
+    return render(request, "_history_rows.html", rows=rows,
+                  superseded_ids=_superseded_history_ids(rows))
 
 
 # ---- transmit log ------------------------------------------------------
@@ -363,6 +390,7 @@ async def save_settings(
     bom_districts: str = Form(""),
     events: list[str] = Form(default=[]),
     all_warnings: str = Form(""),
+    warning_choices_submitted: str = Form(""),
     meshcore_conn: str = Form("serial"),
     meshcore_port: str = Form(""),
     meshcore_host: str = Form(""),
@@ -381,7 +409,15 @@ async def save_settings(
     db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
     db.set_setting("poll_interval", interval)
     db.set_setting("display_timezone", display_timezone.strip())
-    db.set_setting("filter_include_exact", [e for e in events if e in _KNOWN_EVENTS])
+    selected = [e for e in events if e in _KNOWN_EVENTS]
+    if all_warnings and warning_choices_submitted != "1":
+        # Disabled warning checkboxes are omitted by browsers without JavaScript.
+        # Keep saved warning choices while still accepting watches and alerts.
+        saved_warnings = [e for e in db.get_setting("filter_include_exact", [])
+                          if e in _EVENT_GROUPS["Warning products"]]
+        selected = saved_warnings + [e for e in selected
+                                     if e not in _EVENT_GROUPS["Warning products"]]
+    db.set_setting("filter_include_exact", list(dict.fromkeys(selected)))
     db.set_setting("filter_include_suffix", ["Warning"] if all_warnings else [])
     db.set_setting("filter_exclude_exact", [])
 
@@ -485,9 +521,12 @@ async def meshcore_settings_page(request: Request, saved: str = ""):
     except RuntimeError as exc:
         error = str(exc)
     saved_labels = {"name": "Device name", "channel": "Channel name",
+                    "added": "Channel", "removed": "Channel removal",
                     "power": "TX power", "radio": "Radio parameters"}
     return render(request, "meshcore_settings.html", device=device,
-                  error=error, saved_label=saved_labels.get(saved, ""))
+                  error=error, saved_label=saved_labels.get(saved, ""),
+                  live_channel=int(_db(request).get_setting("meshcore_channel", 0)),
+                  test_channel=int(_db(request).get_setting("meshcore_test_channel", 1)))
 
 
 async def _device_edit_error(request: Request, error: str, status_code: int):
@@ -496,7 +535,9 @@ async def _device_edit_error(request: Request, error: str, status_code: int):
     except RuntimeError:
         device = None
     response = render(request, "meshcore_settings.html", device=device,
-                      error=error, saved_label="")
+                      error=error, saved_label="",
+                      live_channel=int(_db(request).get_setting("meshcore_channel", 0)),
+                      test_channel=int(_db(request).get_setting("meshcore_test_channel", 1)))
     response.status_code = status_code
     return response
 
@@ -521,6 +562,40 @@ async def save_meshcore_channel(request: Request, index: int, name: str = Form(.
     except RuntimeError as exc:
         return await _device_edit_error(request, str(exc), 503)
     return RedirectResponse("/meshcore/settings?saved=channel", status_code=303)
+
+
+@router.post("/meshcore/settings/channels/add", response_class=HTMLResponse)
+async def add_meshcore_channel(request: Request, name: str = Form(...),
+                               secret_hex: str = Form("")):
+    try:
+        created = await _tx(request).add_device_channel(name, secret_hex)
+    except ValueError as exc:
+        return await _device_edit_error(request, str(exc), 400)
+    except RuntimeError as exc:
+        return await _device_edit_error(request, str(exc), 503)
+    try:
+        device = await _tx(request).get_device_settings()
+        error = created.get("refresh_error", "")
+    except RuntimeError as exc:
+        device = None
+        error = f"Channel was added, but settings could not be refreshed: {exc}"
+    response = render(request, "meshcore_settings.html", device=device, error=error,
+                      saved_label="", created_channel=created,
+                      live_channel=int(_db(request).get_setting("meshcore_channel", 0)),
+                      test_channel=int(_db(request).get_setting("meshcore_test_channel", 1)))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.post("/meshcore/settings/channel/{index}/remove", response_class=HTMLResponse)
+async def remove_meshcore_channel(request: Request, index: int):
+    try:
+        await _tx(request).remove_device_channel(index)
+    except ValueError as exc:
+        return await _device_edit_error(request, str(exc), 400)
+    except RuntimeError as exc:
+        return await _device_edit_error(request, str(exc), 503)
+    return RedirectResponse("/meshcore/settings?saved=removed", status_code=303)
 
 
 @router.post("/meshcore/settings/tx-power", response_class=HTMLResponse)

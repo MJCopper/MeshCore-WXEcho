@@ -13,6 +13,7 @@ from .config import (
     MULTIPART_GAP_SECONDS,
     POLL_INTERVAL_MIN,
     POLL_HARD_TIMEOUT,
+    VERIFICATION_INTERVAL_SECONDS,
 )
 from .dedupe import decide
 from .filters import FilterRules, should_include
@@ -128,12 +129,15 @@ class BomPoller:
         channel = int(settings.get("meshcore_channel", 0))
         dry_run = bool(settings.get("dry_run", True))
 
+        queued_warning = False
         for item in items:
             try:
-                await self._process(item, rules, tz_name, channel, dry_run)
+                queued_warning |= bool(await self._process(item, rules, tz_name, channel, dry_run))
             except Exception as exc:
                 logger.exception("error processing BOM warning")
                 self._db.add_error("poller", f"process error: {exc}")
+        if queued_warning:
+            self._queue_verification(channel, dry_run)
 
     async def _process(self, item, rules, tz_name, channel, dry_run) -> None:
         alert = Alert.from_bom(item)
@@ -147,7 +151,6 @@ class BomPoller:
                                       if alert.event == "Marine Wind Warning" else ())
         decision = decide(alert, rules, self._db.get_state)
         parts = [_format_cancel(alert, tz_name)] if decision.disposition == "cancelled" else build_mesh_parts(alert, tz_name)
-        parts.append(FINAL_VERIFICATION_MESSAGE)
         logged_text = " || ".join(parts)
 
         revision_hash = alert.revision_hash()
@@ -169,17 +172,19 @@ class BomPoller:
             )
         else:
             history_id = latest["id"]
+            if decision.transmit and dry_run:
+                self._db.refresh_dry_run_history_text(history_id, logged_text)
             if decision.transmit and not dry_run:
                 self._db.update_history_transmit_status(
                     history_id, "queued", decision.detail,
                 )
 
         if not decision.transmit:
-            return
+            return False
         if dry_run:
             for part in parts:
                 self._db.add_event("INFO", f"[DRY-RUN] would send: {part}")
-            return
+            return True
 
         fail_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         aggregate = {"remaining": len(parts), "all_ok": True, "first_err": ""}
@@ -215,6 +220,36 @@ class BomPoller:
                     extra={"alert_id": alert.alert_id,
                            "disposition": decision.disposition,
                            "action": "dry-run" if dry_run else "queued"})
+        return True
+
+    def _queue_verification(self, channel: int, dry_run: bool) -> None:
+        key = "verification_dry_run_last_ts" if dry_run else "verification_live_last_ts"
+        timestamps = self._db.get_setting(key, {}) or {}
+        last = timestamps.get(str(channel), "")
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds()
+        except (TypeError, ValueError):
+            elapsed = VERIFICATION_INTERVAL_SECONDS
+        due = elapsed >= VERIFICATION_INTERVAL_SECONDS
+        if dry_run:
+            if due:
+                self._db.add_event("INFO", f"[DRY-RUN] would send: {FINAL_VERIFICATION_MESSAGE}")
+                timestamps[str(channel)] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                self._db.set_setting(key, timestamps)
+            return
+
+        def on_result(ok: bool, err: str = "") -> None:
+            if ok:
+                saved = self._db.get_setting(key, {}) or {}
+                saved[str(channel)] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                self._db.set_setting(key, saved)
+                self._db.add_event("INFO", "verification message delivered")
+            else:
+                self._db.add_error("broadcast", f"verification message failed: {err}")
+                self._db.add_event("WARN", f"verification message failed: {err}")
+
+        self._tx.enqueue_verification(FINAL_VERIFICATION_MESSAGE, on_result=on_result,
+                                      allow_new=due)
 
     def _record_state(self, alert: Alert, decision) -> None:
         self._db.upsert_state(
