@@ -276,3 +276,41 @@ async def test_delivery_callback_updates_only_its_history_revision(monkeypatch):
     assert len(db.history_rows) == 2
     assert db.history_rows[0]["transmit_status"] == "failed"
     assert db.history_rows[1]["transmit_status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_marine_api_area_change_is_new_revision_without_rss_change(monkeypatch):
+    from app.bom_enricher import BOMEnrichment, WarningSection
+
+    db = _FakeDb()
+    tx = _FakeTx()
+    poller = BomPoller(db, tx)
+    rules = FilterRules(include_exact=[], include_suffix=["Warning"], exclude_exact=[])
+    item = {
+        **_warning_item("http://reg.bom.gov.au/nsw/warnings/marinewind.shtml"),
+        "event": "Marine Wind Warning", "area_desc": "New South Wales",
+        "headline": "Marine Wind Warning Summary for New South Wales",
+        "references": ["http://reg.bom.gov.au/nsw/warnings/marinewind.shtml"],
+    }
+    details = [
+        BOMEnrichment(sections=(WarningSection("Strong Wind Warning", "Hunter Coast", "REN"),)),
+        BOMEnrichment(sections=(WarningSection("Strong Wind Warning", "Hunter Coast", "REN"),)),
+        BOMEnrichment(sections=(
+            WarningSection("Strong Wind Warning", "Hunter Coast, Sydney Coast", "REN"),
+            WarningSection("Cancellation", "Batemans Coast and Eden Coast", "CAN"),
+        )),
+    ]
+
+    async def enrich(url):
+        return details.pop(0)
+
+    monkeypatch.setattr(poller._enricher, "enrich", enrich)
+    for _ in range(3):
+        await poller._process(item, rules, "Australia/Sydney", 0, dry_run=True)
+
+    assert len(db.history_rows) == 2
+    assert db.history_rows[0]["revision_hash"] != db.history_rows[1]["revision_hash"]
+    assert "Sydney Coast" in db.history_rows[1]["transmitted_text"]
+    assert "Cancellation of Marine Wind Warning" in db.history_rows[1]["transmitted_text"]
+    assert "Batemans Coast" in db.history_rows[1]["transmitted_text"]
+    assert tx.enqueued == []

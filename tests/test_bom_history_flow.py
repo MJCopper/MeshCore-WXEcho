@@ -1,0 +1,86 @@
+"""Regression coverage for fixed-link BOM revisions through both views."""
+from types import SimpleNamespace
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.bom import parse_rss
+from app.db import Database
+from app.poller import BomPoller
+from app.web.routes import router
+
+
+class _Radio:
+    port = ""
+    connected = False
+    last_error = ""
+    queue_depth = 0
+
+    def status(self):
+        return []
+
+    def enqueue(self, *args, **kwargs):
+        raise AssertionError("dry-run must not enqueue a radio message")
+
+
+def _feed(issue_time: str, title_time: str) -> str:
+    return f"""<rss><channel><item>
+      <title>{title_time} EST Marine Wind Warning Summary for New South Wales</title>
+      <link>http://reg.bom.gov.au/nsw/warnings/marinewind.shtml</link>
+      <guid>http://reg.bom.gov.au/nsw/warnings/marinewind.shtml</guid>
+      <pubDate>{issue_time}</pubDate>
+    </item></channel></rss>"""
+
+
+@pytest.mark.asyncio
+async def test_fixed_link_revisions_reach_history_and_dashboard(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "history-flow.db"))
+    radio = _Radio()
+    poller = BomPoller(db, radio)
+    feeds = [
+        _feed("Tue, 29 Sep 2026 10:00:00 +0000", "29/20:00"),
+        _feed("Tue, 29 Sep 2026 10:00:00 +0000", "29/20:00"),
+        _feed("Wed, 30 Sep 2026 06:19:54 +0000", "30/16:19"),
+    ]
+
+    class _BOMClient:
+        last_errors = []
+        last_server_date = None
+
+        async def fetch_active(self, regions, districts=None):
+            raw = feeds.pop(0)
+            return parse_rss(raw), raw
+
+    async def _enrich(reference):
+        return SimpleNamespace(locations="", summary="")
+
+    monkeypatch.setattr("app.poller.BOMClient", _BOMClient)
+    monkeypatch.setattr(poller._enricher, "enrich", _enrich)
+    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz: ["marine warning"])
+
+    await poller.poll_once()
+    await poller.poll_once()
+    assert len(db.query_history()) == 1
+    await poller.poll_once()
+    rows = db.query_history()
+    assert len(rows) == 2
+    assert rows[0]["alert_id"] == rows[1]["alert_id"]
+    assert rows[0]["revision_hash"] != rows[1]["revision_hash"]
+    assert rows[0]["disposition"] == "update"
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.db = db
+    app.state.tx = radio
+    app.state.poller = poller
+    client = TestClient(app)
+    history = client.get("/history")
+    dashboard = client.get("/")
+    assert history.status_code == 200
+    assert history.text.count('class="rec"') == 2
+    assert "Unchanged polls do not add entries" in history.text
+    assert dashboard.status_code == 200
+    assert "Recent warning revisions" in dashboard.text
+    assert dashboard.text.count('class="arow"') == 2
+    db.close()

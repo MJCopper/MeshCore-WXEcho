@@ -8,6 +8,7 @@ show only "until <end>". The payload is byte-capped in UTF-8, area trimmed first
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import MAX_PAYLOAD_BYTES
@@ -139,6 +140,31 @@ def format_alert(
     return _truncate_bytes(msg, max_bytes)
 
 
+def _split_complete_message(message: str, max_bytes: int) -> list[str]:
+    """Split on words without silently dropping warning areas."""
+    if _byte_len(message) <= max_bytes:
+        return [message]
+    budget = max_bytes - 12  # room for a multipart marker
+    chunks = []
+    current = ""
+    for word in message.split():
+        candidate = f"{current} {word}" if current else word
+        if _byte_len(candidate) <= budget:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        current = word
+        while _byte_len(current) > budget:
+            piece = _truncate_bytes(current, budget)
+            chunks.append(piece)
+            current = current[len(piece):]
+    if current:
+        chunks.append(current)
+    total = len(chunks)
+    return [_with_part_marker(i, total, chunk) for i, chunk in enumerate(chunks, 1)]
+
+
 def build_mesh_text(alert, tz_name: str = "Australia/Sydney",
                     max_bytes: int = MAX_PAYLOAD_BYTES) -> str:
     """Payload for a non-cancel alert, enriched when BOM page data is available."""
@@ -147,7 +173,32 @@ def build_mesh_text(alert, tz_name: str = "Australia/Sydney",
 
 def build_mesh_parts(alert, tz_name: str = "Australia/Sydney",
                      max_bytes: int = MAX_PAYLOAD_BYTES) -> list[str]:
-    """Return one part for ordinary alerts; enriched alerts may return two parts."""
+    """Return byte-capped parts for an alert, preserving marine warning areas."""
+    sections = getattr(alert, "warning_sections", ()) or ()
+    if sections:
+        parts = []
+        for section in sections:
+            onset = _to_local(section.onset, tz_name)
+            day = f"{onset:%a} " if onset else ""
+            if section.phase == "CAN" or section.phenomenon.casefold() == "cancellation":
+                prefix = f"Cancellation of {alert.event} for {day}"
+            else:
+                prefix = f"{section.phenomenon} for {day}"
+            areas = [area.strip() for area in re.split(r",\s*|\s+and\s+", section.areas) if area.strip()]
+            current = prefix
+            for area in areas:
+                candidate = current + (", " if current != prefix else "") + area
+                if _byte_len(candidate) > max_bytes and current != prefix:
+                    parts.append(current)
+                    current = prefix + area
+                else:
+                    current = candidate
+                if _byte_len(current) > max_bytes:
+                    parts.extend(_split_complete_message(current, max_bytes))
+                    current = prefix
+            if current != prefix:
+                parts.append(current)
+        return parts
     locations = getattr(alert, "specific_locations", "") or ""
     summary = getattr(alert, "warning_summary", "") or ""
     if locations and summary:

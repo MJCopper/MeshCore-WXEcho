@@ -55,3 +55,49 @@ async def test_enricher_falls_back_on_api_failure():
         router.get(MOCK_URL).mock(return_value=httpx.Response(503))
         result = await BOMWarningEnricher().enrich(URL)
     assert result == BOMEnrichment()
+
+MARINE_LEGACY_URL = "http://reg.bom.gov.au/nsw/warnings/marinewind.shtml"
+MARINE_API_URL = "https://api.bom.gov.au/apikey/v1/warnings/warning/IDN20400"
+MARINE_PAYLOAD = {
+    "warning": {
+        "id": "IDN20400",
+        "info": [
+            {"summary": "Strong Wind Warning for Wednesday for Hunter Coast, Sydney Coast and Illawarra Coast"},
+            {"is_hazard": "true", "phase": "REN", "phenomena": "Strong Wind Warning",
+             "onset_datetime_utc": "2026-09-30T06:00:00Z",
+             "area_summary": "Hunter Coast, Sydney Coast and Illawarra Coast"},
+            {"is_hazard": "true", "phase": "CAN", "phenomena": "Cancellation",
+             "onset_datetime_utc": "2026-09-30T06:00:00Z",
+             "area_summary": "Batemans Coast and Eden Coast"},
+        ],
+    },
+}
+
+
+def test_marine_warning_keeps_active_and_cancelled_areas_separate():
+    result = parse_warning_api(MARINE_PAYLOAD)
+    assert len(result.sections) == 2
+    assert result.sections[0].phenomenon == "Strong Wind Warning"
+    assert result.sections[0].areas == "Hunter Coast, Sydney Coast and Illawarra Coast"
+    assert result.sections[1].phase == "CAN"
+    assert result.sections[1].areas == "Batemans Coast and Eden Coast"
+
+
+@pytest.mark.asyncio
+async def test_legacy_marine_link_resolves_product_id_and_fetches_api():
+    with respx.mock() as router:
+        page = router.get(MARINE_LEGACY_URL).mock(return_value=httpx.Response(
+            200, text='<div class="product"><p class="p-id">IDN20400</p></div>'))
+        api = router.get(MARINE_API_URL).mock(return_value=httpx.Response(200, json=MARINE_PAYLOAD))
+        result = await BOMWarningEnricher().enrich(MARINE_LEGACY_URL)
+    assert page.call_count == 1
+    assert api.call_count == 1
+    assert len(result.sections) == 2
+
+
+@pytest.mark.asyncio
+async def test_legacy_lookup_falls_back_when_product_page_fails():
+    with respx.mock() as router:
+        router.get(MARINE_LEGACY_URL).mock(return_value=httpx.Response(503))
+        result = await BOMWarningEnricher().enrich(MARINE_LEGACY_URL)
+    assert result == BOMEnrichment()

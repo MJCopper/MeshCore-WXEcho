@@ -85,3 +85,44 @@ def test_final_verification_payload_is_exact_and_within_byte_cap():
         "bom.gov.au/weather-and-climate/warnings-and-alerts"
     )
     assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) <= MAX_PAYLOAD_BYTES
+
+
+def test_marine_warning_sections_keep_cancellations_distinct():
+    from app.models import Alert
+    from app.bom_enricher import WarningSection
+
+    alert = Alert(
+        alert_id="marine", event="Marine Wind Warning", headline="marine",
+        area_desc="New South Wales", effective="", expires="", message_type="Alert",
+        warning_sections=(
+            WarningSection("Strong Wind Warning", "Hunter Coast, Sydney Coast and Illawarra Coast",
+                           "REN", "2026-09-30T06:00:00Z"),
+            WarningSection("Cancellation", "Batemans Coast and Eden Coast",
+                           "CAN", "2026-09-30T06:00:00Z"),
+        ),
+    )
+    parts = build_mesh_parts(alert, "Australia/Sydney")
+    assert len(parts) == 2
+    assert "Strong Wind Warning" in parts[0]
+    assert "Hunter Coast" in parts[0]
+    assert "Illawarra Coast" in parts[0]
+    assert "Cancellation" in parts[1]
+    assert "Batemans Coast" in parts[1]
+    assert "Eden Coast" in parts[1]
+    assert all(len(part.encode()) <= MAX_PAYLOAD_BYTES for part in parts)
+
+
+def test_long_marine_section_splits_without_losing_areas():
+    from app.models import Alert
+    from app.bom_enricher import WarningSection
+
+    areas = "Hunter Coast, Sydney Coast, Illawarra Coast and Batemans Coast"
+    alert = Alert(
+        alert_id="marine", event="Marine Wind Warning", headline="marine",
+        area_desc="New South Wales", effective="", expires="", message_type="Alert",
+        warning_sections=(WarningSection("Strong Wind Warning", areas),),
+    )
+    parts = build_mesh_parts(alert, max_bytes=55)
+    assert len(parts) > 1
+    assert all(len(part.encode()) <= 55 for part in parts)
+    assert "Batemans Coast" in " ".join(parts)

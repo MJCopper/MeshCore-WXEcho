@@ -20,6 +20,15 @@ from .config import BOM_USER_AGENT
 class BOMEnrichment:
     locations: str = ""
     summary: str = ""
+    sections: tuple["WarningSection", ...] = ()
+
+
+@dataclass(frozen=True)
+class WarningSection:
+    phenomenon: str
+    areas: str
+    phase: str = ""
+    onset: str = ""
 
 
 class _WarningPageParser(HTMLParser):
@@ -114,7 +123,20 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
     if not candidates:
         candidates = [_strip_markup(warning.get("phenomena_summary", ""))]
     summary = _clean_sentence(candidates[0], 130) if candidates and candidates[0] else ""
-    return BOMEnrichment(locations=locations, summary=summary)
+    sections = []
+    for item in info:
+        if str(item.get("is_hazard", "")).lower() != "true":
+            continue
+        areas = _strip_markup(item.get("area_summary", ""))
+        phenomenon = _strip_markup(item.get("phenomena", ""))
+        if not areas or not phenomenon:
+            continue
+        sections.append(WarningSection(
+            phenomenon=phenomenon, areas=areas,
+            phase=str(item.get("phase") or ""),
+            onset=str(item.get("onset_datetime_utc") or ""),
+        ))
+    return BOMEnrichment(locations=locations, summary=summary, sections=tuple(sections))
 
 
 def _warning_api_url(url: str) -> str:
@@ -129,7 +151,7 @@ def _warning_api_url(url: str) -> str:
 
 
 class BOMWarningEnricher:
-    def __init__(self, timeout: float = 7.0, cache_ttl: float = 600.0, max_cache: int = 20):
+    def __init__(self, timeout: float = 7.0, cache_ttl: float = 60.0, max_cache: int = 20):
         self.timeout = timeout
         self.cache_ttl = cache_ttl
         self.max_cache = max_cache
@@ -138,7 +160,19 @@ class BOMWarningEnricher:
     async def enrich(self, url: str) -> BOMEnrichment:
         api_url = _warning_api_url(url)
         if not api_url:
-            return BOMEnrichment()
+            parsed = urlparse(url)
+            if parsed.hostname not in {"www.bom.gov.au", "reg.bom.gov.au"}:
+                return BOMEnrichment()
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, headers={"User-Agent": BOM_USER_AGENT}) as client:
+                    page = await asyncio.wait_for(client.get(url), timeout=self.timeout)
+                    page.raise_for_status()
+                match = re.search(r'<p\b[^>]*class=["\']p-id["\'][^>]*>\s*(ID[A-Z0-9]+)\s*</p>', page.text, re.IGNORECASE)
+                if not match:
+                    return BOMEnrichment()
+                api_url = "https://api.bom.gov.au/apikey/v1/warnings/warning/%s" % match.group(1).upper()
+            except (asyncio.TimeoutError, httpx.HTTPError):
+                return BOMEnrichment()
         now = time.monotonic()
         cached = self._cache.get(api_url)
         if cached and cached[0] > now:
@@ -156,8 +190,9 @@ class BOMWarningEnricher:
             result = parse_warning_api(response.json())
         except (asyncio.TimeoutError, httpx.HTTPError, ValueError, TypeError):
             result = BOMEnrichment()
-        self._cache[api_url] = (now + self.cache_ttl, result)
-        self._cache.move_to_end(api_url)
-        while len(self._cache) > self.max_cache:
-            self._cache.popitem(last=False)
+        if result != BOMEnrichment():
+            self._cache[api_url] = (now + self.cache_ttl, result)
+            self._cache.move_to_end(api_url)
+            while len(self._cache) > self.max_cache:
+                self._cache.popitem(last=False)
         return result

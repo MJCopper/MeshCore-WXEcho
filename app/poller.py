@@ -15,7 +15,7 @@ from .config import (
     POLL_HARD_TIMEOUT,
 )
 from .dedupe import decide
-from .filters import FilterRules
+from .filters import FilterRules, should_include
 from .formatter import build_mesh_parts
 from .models import Alert
 
@@ -139,11 +139,13 @@ class BomPoller:
         alert = Alert.from_bom(item)
         if not alert.alert_id:
             return
-        decision = decide(alert, rules, self._db.get_state)
-        if decision.transmit and decision.disposition != "cancelled" and alert.references:
+        if alert.message_type != "Cancel" and alert.references and should_include(alert.event, rules):
             enrichment = await self._enricher.enrich(alert.references[0])
             alert.specific_locations = enrichment.locations
             alert.warning_summary = enrichment.summary
+            alert.warning_sections = (getattr(enrichment, "sections", ())
+                                      if alert.event == "Marine Wind Warning" else ())
+        decision = decide(alert, rules, self._db.get_state)
         parts = [_format_cancel(alert, tz_name)] if decision.disposition == "cancelled" else build_mesh_parts(alert, tz_name)
         parts.append(FINAL_VERIFICATION_MESSAGE)
         logged_text = " || ".join(parts)

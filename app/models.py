@@ -20,6 +20,7 @@ class Alert:
     detail: str = ""
     specific_locations: str = ""
     warning_summary: str = ""
+    warning_sections: tuple = ()
     references: list[str] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
@@ -42,10 +43,10 @@ class Alert:
 
     def content_hash(self) -> str:
         """Hash of the fields that determine whether a rebroadcast is warranted."""
-        basis = f"{self.event}|{self.headline}|{self.area_desc}|{self.expires}|{self.detail}"
+        basis = f"{self.event}|{self.headline}|{self.area_desc}|{self.expires}|{self.detail}|{self.warning_sections}"
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
     def revision_hash(self) -> str:
         """Identify a received warning revision, including its issue time."""
-        basis = f"{self.message_type}|{self.event}|{self.headline}|{self.area_desc}|{self.effective}|{self.expires}|{self.detail}"
+        basis = f"{self.message_type}|{self.event}|{self.headline}|{self.area_desc}|{self.effective}|{self.expires}|{self.detail}|{self.warning_sections}"
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
