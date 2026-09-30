@@ -15,13 +15,18 @@ class _FakeDb:
     def get_state(self, alert_id):
         return None
 
-    def history_exists(self, alert_id):
-        return any(row["alert_id"] == alert_id for row in self.history_rows)
+    def latest_history(self, alert_id):
+        for row in reversed(self.history_rows):
+            if row["alert_id"] == alert_id:
+                return row
+        return None
 
     def add_history(self, alert_id, event, area, disposition, transmitted_text="", detail="",
-                    transmit_status=None):
+                    transmit_status=None, revision_hash=""):
+        row_id = len(self.history_rows) + 1
         self.history_rows.append(
             {
+                "id": row_id,
                 "alert_id": alert_id,
                 "event": event,
                 "area": area,
@@ -29,12 +34,14 @@ class _FakeDb:
                 "transmitted_text": transmitted_text,
                 "detail": detail,
                 "transmit_status": transmit_status,
+                "revision_hash": revision_hash,
             }
         )
+        return row_id
 
-    def update_history_transmit_status(self, alert_id, transmit_status, detail=None):
+    def update_history_transmit_status(self, history_id, transmit_status, detail=None):
         for row in self.history_rows:
-            if row["alert_id"] == alert_id:
+            if row["id"] == history_id:
                 row["transmit_status"] = transmit_status
                 if detail is not None:
                     row["detail"] = detail
@@ -223,3 +230,49 @@ async def test_dry_run_alert_is_queued_when_broadcasting_goes_live(monkeypatch):
     assert db.history_rows[0]["transmit_status"] == "queued"
     assert db.history_rows[0]["detail"] == "new alert"
     assert len(tx.enqueued) == 2
+
+
+@pytest.mark.asyncio
+async def test_history_records_changed_warning_body_once_per_revision(monkeypatch):
+    db = _FakeDb()
+    tx = _FakeTx()
+    poller = BomPoller(db, tx)
+    rules = FilterRules(include_exact=[], include_suffix=["Warning"], exclude_exact=[])
+    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz: ["warning"])
+    item = _warning_item("same-link")
+    item["detail"] = "Initial warning details"
+
+    await poller._process(item, rules, "Australia/Sydney", 0, dry_run=True)
+    await poller._process(item, rules, "Australia/Sydney", 0, dry_run=True)
+    assert len(db.history_rows) == 1
+
+    revised = {**item, "detail": "Changed warning details"}
+    await poller._process(revised, rules, "Australia/Sydney", 0, dry_run=True)
+    await poller._process(revised, rules, "Australia/Sydney", 0, dry_run=True)
+    assert len(db.history_rows) == 2
+    assert db.history_rows[0]["disposition"] == "sent"
+    assert db.history_rows[1]["disposition"] == "update"
+
+
+@pytest.mark.asyncio
+async def test_delivery_callback_updates_only_its_history_revision(monkeypatch):
+    db = _FakeDb()
+    tx = _FakeTx()
+    poller = BomPoller(db, tx)
+    rules = FilterRules(include_exact=[], include_suffix=["Warning"], exclude_exact=[])
+    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz: ["warning"])
+    first = _warning_item("same-link")
+    second = {**first, "detail": "Revised content"}
+
+    await poller._process(first, rules, "Australia/Sydney", 0, dry_run=False)
+    first_callback = tx.enqueued[-1]["on_result"]
+    await poller._process(second, rules, "Australia/Sydney", 0, dry_run=False)
+    second_callback = tx.enqueued[-1]["on_result"]
+    second_callback(True, "")
+    second_callback(True, "")
+    first_callback(False, "old send failed")
+    first_callback(True, "")
+
+    assert len(db.history_rows) == 2
+    assert db.history_rows[0]["transmit_status"] == "failed"
+    assert db.history_rows[1]["transmit_status"] == "success"

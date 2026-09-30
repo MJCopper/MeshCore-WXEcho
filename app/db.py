@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS history (
     disposition      TEXT,
     transmit_status  TEXT,
     transmitted_text TEXT,
-    detail           TEXT
+    detail           TEXT,
+    revision_hash    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS transmit_log (
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_history_ts ON history(ts);
 CREATE INDEX IF NOT EXISTS idx_history_disp ON history(disposition);
+CREATE INDEX IF NOT EXISTS idx_history_alert_id ON history(alert_id, id);
 CREATE INDEX IF NOT EXISTS idx_txlog_ts ON transmit_log(ts);
 """
 
@@ -105,6 +107,8 @@ class Database:
             }
             if "transmit_status" not in history_columns:
                 self._conn.execute("ALTER TABLE history ADD COLUMN transmit_status TEXT")
+            if "revision_hash" not in history_columns:
+                self._conn.execute("ALTER TABLE history ADD COLUMN revision_hash TEXT")
             transmit_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(transmit_log)")
             }
@@ -218,50 +222,41 @@ class Database:
         transmitted_text: str = "",
         detail: str = "",
         transmit_status: Optional[str] = None,
-    ) -> None:
+        revision_hash: str = "",
+    ) -> int:
         with self._lock:
-            self._conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO history(ts, alert_id, event, area, disposition, "
-                "transmit_status, transmitted_text, detail) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "transmit_status, transmitted_text, detail, revision_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (_now(), alert_id, event, area, disposition,
-                 transmit_status, transmitted_text, detail),
+                 transmit_status, transmitted_text, detail, revision_hash),
             )
             self._conn.commit()
+            return cur.lastrowid
+
+    def latest_history(self, alert_id: str) -> Optional[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT id, revision_hash FROM history WHERE alert_id = ? "
+                "ORDER BY id DESC LIMIT 1", (alert_id,),
+            ).fetchone()
 
     def update_history_transmit_status(
-        self, alert_id: str, transmit_status: str, detail: Optional[str] = None,
+        self, history_id: int, transmit_status: str, detail: Optional[str] = None,
     ) -> None:
         with self._lock:
             if detail is None:
                 self._conn.execute(
-                    "UPDATE history SET transmit_status = ? WHERE alert_id = ?",
-                    (transmit_status, alert_id),
+                    "UPDATE history SET transmit_status = ? WHERE id = ?",
+                    (transmit_status, history_id),
                 )
             else:
                 self._conn.execute(
-                    "UPDATE history SET transmit_status = ?, detail = ? WHERE alert_id = ?",
-                    (transmit_status, detail, alert_id),
+                    "UPDATE history SET transmit_status = ?, detail = ? WHERE id = ?",
+                    (transmit_status, detail, history_id),
                 )
             self._conn.commit()
-
-    def history_exists(self, alert_id: str, disposition: Optional[str] = None) -> bool:
-        # True if a history row exists for this alert id (optionally a specific
-        # disposition). With disposition=None it dedupes by id alone, so each
-        # alert pulled from BOM is logged only once despite re-polling.
-        with self._lock:
-            if disposition is None:
-                row = self._conn.execute(
-                    "SELECT 1 FROM history WHERE alert_id = ? LIMIT 1",
-                    (alert_id,),
-                ).fetchone()
-            else:
-                row = self._conn.execute(
-                    "SELECT 1 FROM history WHERE alert_id = ? AND disposition = ? "
-                    "LIMIT 1",
-                    (alert_id, disposition),
-                ).fetchone()
-        return row is not None
 
     def prune_history(self, keep_days: int = 90) -> int:
         # Delete history rows older than keep_days; bounds long-term growth.

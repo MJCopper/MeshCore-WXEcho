@@ -99,6 +99,7 @@ def test_existing_database_gains_history_delivery_column(tmp_path):
     }
 
     assert "transmit_status" in history_columns
+    assert "revision_hash" in history_columns
     assert "transport" in transmit_columns
     db.close()
 
@@ -126,3 +127,21 @@ def test_restart_removes_state_created_by_legacy_dry_run(tmp_path):
     assert migrated.get_state("dry-run-alert") is None
     assert migrated.query_history()[0]["transmit_status"] == "dry-run"
     migrated.close()
+
+
+def test_history_revisions_keep_independent_delivery_status(tmp_path):
+    db = Database(str(tmp_path / "revisions.db"))
+    first_id = db.add_history("same-link", "Flood Warning", "Hunter", "sent",
+                              transmit_status="queued", revision_hash="old")
+    second_id = db.add_history("same-link", "Flood Warning", "Hunter", "update",
+                               transmit_status="queued", revision_hash="new")
+
+    assert db.latest_history("same-link")["id"] == second_id
+    assert db.latest_history("same-link")["revision_hash"] == "new"
+    db.update_history_transmit_status(first_id, "failed")
+    db.update_history_transmit_status(second_id, "success")
+
+    rows = db.query_history()
+    assert [(row["id"], row["transmit_status"]) for row in rows] == [
+        (second_id, "success"), (first_id, "failed")]
+    db.close()

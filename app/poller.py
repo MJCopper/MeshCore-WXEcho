@@ -148,20 +148,29 @@ class BomPoller:
         parts.append(FINAL_VERIFICATION_MESSAGE)
         logged_text = " || ".join(parts)
 
-        history_exists = self._db.history_exists(alert.alert_id)
-        if not history_exists:
+        revision_hash = alert.revision_hash()
+        latest = self._db.latest_history(alert.alert_id)
+        if latest is None or latest["revision_hash"] != revision_hash:
             detail = decision.detail
             history_text = logged_text if decision.transmit else ""
             transmit_status = "queued" if decision.transmit else None
             if decision.transmit and dry_run:
                 detail = f"DRY-RUN: {decision.detail}"
                 transmit_status = "dry-run"
-            self._db.add_history(alert.alert_id, alert.event, alert.area_desc,
-                                 decision.disposition, history_text, detail,
-                                 transmit_status=transmit_status)
-        elif decision.transmit and not dry_run:
-            self._db.update_history_transmit_status(
-                alert.alert_id, "queued", decision.detail)
+            disposition = decision.disposition
+            if latest is not None and disposition == "sent":
+                disposition = "update"
+            history_id = self._db.add_history(
+                alert.alert_id, alert.event, alert.area_desc, disposition,
+                history_text, detail, transmit_status=transmit_status,
+                revision_hash=revision_hash,
+            )
+        else:
+            history_id = latest["id"]
+            if decision.transmit and not dry_run:
+                self._db.update_history_transmit_status(
+                    history_id, "queued", decision.detail,
+                )
 
         if not decision.transmit:
             return
@@ -173,7 +182,7 @@ class BomPoller:
         fail_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         aggregate = {"remaining": len(parts), "all_ok": True, "first_err": ""}
 
-        def _on_result(ok, err="", a=alert, d=decision, t=logged_text, ts=fail_ts):
+        def _on_result(ok, err="", a=alert, d=decision, t=logged_text, ts=fail_ts, row_id=history_id):
             if not ok:
                 aggregate["all_ok"] = False
                 if not aggregate["first_err"]:
@@ -182,11 +191,11 @@ class BomPoller:
             if aggregate["remaining"] > 0:
                 return
             if aggregate["all_ok"]:
-                self._db.update_history_transmit_status(a.alert_id, "success")
+                self._db.update_history_transmit_status(row_id, "success")
                 self._record_state(a, d)
                 return
             self._db.update_history_transmit_status(
-                a.alert_id, "failed",
+                row_id, "failed",
                 "%s; broadcast failed: %s" % (d.detail, aggregate["first_err"]),
             )
             self.status.last_broadcast_failure = ts
