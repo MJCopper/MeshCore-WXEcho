@@ -10,6 +10,7 @@ from .bom_enricher import BOMWarningEnricher
 from .config import (
     BURST_GAP_SECONDS,
     FINAL_VERIFICATION_MESSAGE,
+    MAX_PAYLOAD_BYTES,
     MULTIPART_GAP_SECONDS,
     POLL_INTERVAL_MIN,
     POLL_HARD_TIMEOUT,
@@ -17,7 +18,7 @@ from .config import (
 )
 from .dedupe import decide
 from .filters import FilterRules, should_include
-from .formatter import build_mesh_parts
+from .formatter import build_mesh_parts, _split_complete_message
 from .models import Alert
 
 logger = logging.getLogger("wx_echo.poller")
@@ -150,7 +151,10 @@ class BomPoller:
             alert.warning_sections = (getattr(enrichment, "sections", ())
                                       if alert.event == "Marine Wind Warning" else ())
         decision = decide(alert, rules, self._db.get_state)
-        parts = [_format_cancel(alert, tz_name)] if decision.disposition == "cancelled" else build_mesh_parts(alert, tz_name)
+        budget = getattr(self._tx, "message_budget", MAX_PAYLOAD_BYTES)
+        parts = (_split_complete_message(_format_cancel(alert, tz_name), budget)
+                 if decision.disposition == "cancelled"
+                 else build_mesh_parts(alert, tz_name, max_bytes=budget))
         logged_text = " || ".join(parts)
 
         revision_hash = alert.revision_hash()
@@ -223,6 +227,13 @@ class BomPoller:
         return True
 
     def _queue_verification(self, channel: int, dry_run: bool) -> None:
+        budget = getattr(self._tx, "message_budget", MAX_PAYLOAD_BYTES)
+        length = len(FINAL_VERIFICATION_MESSAGE.encode("utf-8"))
+        if length > budget:
+            detail = f"verification message exceeds MeshCore limit ({length} > {budget} bytes)"
+            self._db.add_error("broadcast", detail)
+            self._db.add_event("WARN", detail)
+            return
         key = "verification_dry_run_last_ts" if dry_run else "verification_live_last_ts"
         timestamps = self._db.get_setting(key, {}) or {}
         last = timestamps.get(str(channel), "")
@@ -264,14 +275,10 @@ class BomPoller:
 
 
 def _format_cancel(alert: Alert, tz_name: str) -> str:
-    from .config import MAX_PAYLOAD_BYTES
     from .formatter import PREFIX, _area_string
 
     area = _area_string(alert.area_desc)
     body = f"CANCELLED: {alert.event}"
     if area:
         body += f": {area}"
-    msg = PREFIX + body
-    if len(msg.encode()) <= MAX_PAYLOAD_BYTES:
-        return msg
-    return (PREFIX + f"CANCELLED: {alert.event}")[:MAX_PAYLOAD_BYTES]
+    return PREFIX + body

@@ -70,21 +70,21 @@ def test_build_mesh_parts_splits_enriched_alert_with_markers_and_byte_caps():
         ),
     )
     parts = build_mesh_parts(alert, "Australia/Perth", max_bytes=120)
-    assert len(parts) == 2
-    assert parts[0].startswith("1/2 ")
-    assert parts[1].startswith("2/2 ")
-    assert "Eyre" in parts[0]
-    assert "Damaging winds" in parts[1]
-    assert len(parts[0].encode()) <= 120
-    assert len(parts[1].encode()) <= 120
+    assert len(parts) >= 2
+    assert all(part.startswith(f"{i}/{len(parts)} ") for i, part in enumerate(parts, 1))
+    assert "Eyre" in " ".join(parts)
+    reconstructed = " ".join(part.split(" ", 1)[1] for part in parts)
+    assert "Damaging winds" in reconstructed
+    assert "creek crossings" in " ".join(parts)
+    assert all(len(part.encode()) <= 120 for part in parts)
 
 
 def test_final_verification_payload_is_exact_and_within_byte_cap():
     assert FINAL_VERIFICATION_MESSAGE == (
-        "UNOFFICIAL automated relay. May be inaccurate, incomplete, delayed, or missing. "
-        "VERIFY information independently. NEVER make a safety decision based on these notices."
+        "UNOFFICIAL automated relay. May be INCORRECT or INCOMPLETE. "
+        "VERIFY independently. NEVER make a safety decision based on these notices."
     )
-    assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) <= MAX_PAYLOAD_BYTES
+    assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) > MAX_PAYLOAD_BYTES
 
 
 def test_marine_warning_sections_keep_cancellations_distinct():

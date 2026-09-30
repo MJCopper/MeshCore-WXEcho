@@ -57,7 +57,7 @@ def render(request: Request, name: str, **ctx):
         tz = ""   # fall back to this machine's local time
     return TEMPLATES.TemplateResponse(
         request, name,
-        {"max_bytes": MAX_PAYLOAD_BYTES, "tz": tz, "disp_label": DISP_LABELS,
+        {"max_bytes": getattr(_tx(request), "message_budget", MAX_PAYLOAD_BYTES), "tz": tz, "disp_label": DISP_LABELS,
          "tx_label": TX_STATUS_LABELS, "version": __version__, **ctx},
     )
 
@@ -630,10 +630,11 @@ async def manual_page(request: Request):
 @router.post("/manual/send", response_class=HTMLResponse)
 async def manual_send(request: Request, text: str = Form(...)):
     tx = _tx(request)
-    text = text[:MAX_PAYLOAD_BYTES] if len(text.encode()) > MAX_PAYLOAD_BYTES else text
-    # Enforce byte cap defensively (multibyte-safe).
-    while len(text.encode()) > MAX_PAYLOAD_BYTES:
-        text = text[:-1]
+    budget = getattr(tx, "message_budget", MAX_PAYLOAD_BYTES)
+    if len(text.encode("utf-8")) > budget:
+        return render(request, "_manual_result.html", ok=False,
+                      message=f"message exceeds MeshCore limit ({budget} bytes)",
+                      text=text, bytes=len(text.encode("utf-8")))
     ok = await tx.send_manual(text)   # goes on each radio's LIVE channel
     msg = "sent" if ok else f"failed: {tx.last_error}"
     return render(request, "_manual_result.html", ok=ok, message=msg,

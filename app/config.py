@@ -153,13 +153,14 @@ POLL_INTERVAL_MIN = 60
 # timeout x a few retries), so exceeding this means something hung (DB lock,
 # wedged await, a bug). The watchdog aborts the poll so the loop always recovers.
 POLL_HARD_TIMEOUT = 180
-MAX_PAYLOAD_BYTES = 195
+MESHCORE_CHANNEL_TEXT_BYTES = 160
+MESHCORE_MAX_NAME_BYTES = 32
+# Safe while the companion is offline; the live budget uses its actual name.
+MAX_PAYLOAD_BYTES = MESHCORE_CHANNEL_TEXT_BYTES - MESHCORE_MAX_NAME_BYTES - 2
 FINAL_VERIFICATION_MESSAGE = (
-    "UNOFFICIAL automated relay. May be inaccurate, incomplete, delayed, or missing. "
-    "VERIFY information independently. NEVER make a safety decision based on these notices."
+    "UNOFFICIAL automated relay. May be INCORRECT or INCOMPLETE. "
+    "VERIFY independently. NEVER make a safety decision based on these notices."
 )
-if len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) > MAX_PAYLOAD_BYTES:
-    raise ValueError("FINAL_VERIFICATION_MESSAGE exceeds MAX_PAYLOAD_BYTES")
 
 VERIFICATION_INTERVAL_SECONDS = 300
 

@@ -12,6 +12,7 @@ from app.web.routes import router
 
 
 class _Radio:
+    message_budget = 195
     port = ""
     connected = False
     last_error = ""
@@ -57,7 +58,7 @@ async def test_fixed_link_revisions_reach_history_and_dashboard(tmp_path, monkey
 
     monkeypatch.setattr("app.poller.BOMClient", _BOMClient)
     monkeypatch.setattr(poller._enricher, "enrich", _enrich)
-    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz: ["marine warning"])
+    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz, **kwargs: ["marine warning"])
 
     await poller.poll_once()
     await poller.poll_once()

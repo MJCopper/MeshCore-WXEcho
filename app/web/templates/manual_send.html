@@ -33,12 +33,10 @@
   function updateCount(){
     const ta = document.getElementById('msg');
     let n = byteLen(ta.value);
-    // hard cap: trim to the byte limit as you type or paste
-    while(n > MAX){ ta.value = ta.value.slice(0, -1); n = byteLen(ta.value); }
     const c = document.getElementById('count');
     c.textContent = n + '/' + MAX;
     c.classList.remove('warn', 'full');
-    if(n >= MAX) c.classList.add('full');
+    if(n > MAX) c.classList.add('full');
     else if(n >= MAX - 10) c.classList.add('warn');
   }
   document.addEventListener('DOMContentLoaded', updateCount);

@@ -18,7 +18,8 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import BURST_GAP_SECONDS, REPEAT_GAP_SECONDS, QUEUE_MAX, MAX_PAYLOAD_BYTES
+from .config import (BURST_GAP_SECONDS, REPEAT_GAP_SECONDS, QUEUE_MAX, MAX_PAYLOAD_BYTES,
+                     MESHCORE_CHANNEL_TEXT_BYTES)
 
 
 class TxUnsent(Exception):
@@ -64,6 +65,13 @@ class MeshCoreTransmitter(Transmitter):
     def __init__(self, conn: str, port: str = "", host: str = "", baud: int = 115200):
         self.conn, self.port, self.host, self.baud = conn, port, host, baud
         self._mc = None
+        self._sender_name = None
+
+    @property
+    def message_budget(self) -> int:
+        if self._sender_name is None:
+            return MAX_PAYLOAD_BYTES
+        return max(0, MESHCORE_CHANNEL_TEXT_BYTES - len(self._sender_name.encode("utf-8")) - 2)
 
     async def connect(self) -> None:
         from meshcore import MeshCore  # lazy: optional dependency
@@ -82,10 +90,20 @@ class MeshCoreTransmitter(Transmitter):
         if self._mc is None:
             where = self.host if self.conn == "tcp" else self.port
             raise RuntimeError("no response from MeshCore node on %s" % (where or "(unset)"))
+        from meshcore import EventType
+        info = await self._mc.commands.send_appstart()
+        if info.type != EventType.SELF_INFO or not isinstance(info.payload, dict):
+            raise RuntimeError("could not read MeshCore sender name")
+        self._sender_name = info.payload.get("name")
+        if not isinstance(self._sender_name, str):
+            raise RuntimeError("MeshCore sender name is unavailable")
 
     async def send_text(self, text: str, channel: int) -> None:
         if self._mc is None:
             raise RuntimeError("not connected")
+        size = len(text.encode("utf-8"))
+        if size > self.message_budget:
+            raise TxUnsent("too_large", f"message is {size} bytes; MeshCore allows {self.message_budget} with sender name")
         # The device's OK/timeout is NOT proof of RF -- a channel broadcast has no
         # ACK, so an "OK" only means the command was accepted, not that the radio
         # keyed up. Confirm the actual transmission by watching the radio's own
@@ -120,6 +138,7 @@ class MeshCoreTransmitter(Transmitter):
             return None
 
     async def close(self) -> None:
+        self._sender_name = None
         if self._mc is not None:
             mc, self._mc = self._mc, None
             try:
@@ -223,6 +242,7 @@ class MeshCoreTransmitter(Transmitter):
         result = await self._mc.commands.set_name(name)
         if result.type != EventType.OK:
             raise RuntimeError("radio rejected the device name")
+        self._sender_name = name
         verified = await self._mc.commands.send_appstart()
         if verified.type != EventType.SELF_INFO or (verified.payload or {}).get("name", "").strip() != name:
             raise RuntimeError("could not verify the saved device name")
@@ -514,6 +534,11 @@ class TransmitManager:
         return self._transports["meshcore"].target or None
 
     @property
+    def message_budget(self) -> int:
+        t = self._transports["meshcore"]
+        return t.tx.message_budget if isinstance(t.tx, MeshCoreTransmitter) and t.connected else MAX_PAYLOAD_BYTES
+
+    @property
     def queue_depth(self) -> int:
         return len(self._queue)
 
@@ -757,10 +782,6 @@ class TransmitManager:
 
     async def _send_all(self, text: str, manual: bool, on_test: bool | None = None) -> bool:
         any_ok = False
-        # Validate before keying any radio: trim to the payload cap (multibyte-safe)
-        # so a too-long message never gets silently rejected by the firmware.
-        while len(text.encode()) > MAX_PAYLOAD_BYTES:
-            text = text[:-1]
         blen = len(text.encode())
         # `on_test` picks the channel (test vs live); `manual` only tags the log
         # (auto vs manual). Automated alerts AND composed manual sends both go on

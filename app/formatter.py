@@ -1,4 +1,4 @@
-"""Format BOM alerts into MeshCore text payloads (<= 195 bytes).
+"""Format BOM alerts into MeshCore channel text parts.
 
 Multi-area alerts are summarised using the first BOM area followed by
 "and surrounding areas". Times are local (tz abbreviation dropped because the
@@ -127,17 +127,7 @@ def format_alert(
             body += f" {when}"
         return PREFIX + body
 
-    msg = assemble(area)
-    if _byte_len(msg) <= max_bytes:
-        return msg
-    primary_only = area.replace(" and surrounding areas", "")
-    msg = assemble(primary_only)
-    if _byte_len(msg) <= max_bytes:
-        return msg
-    msg = assemble("")
-    if _byte_len(msg) <= max_bytes:
-        return msg
-    return _truncate_bytes(msg, max_bytes)
+    return assemble(area)
 
 
 def _split_complete_message(message: str, max_bytes: int) -> list[str]:
@@ -210,15 +200,11 @@ def build_mesh_parts(alert, tz_name: str = "Australia/Sydney",
         if _byte_len(one_part) <= max_bytes:
             return [one_part]
 
-        p1_budget = max(0, max_bytes - _byte_len(_part_prefix(1, 2)))
-        p2_budget = max(0, max_bytes - _byte_len(_part_prefix(2, 2)))
-        p1_body = _truncate_words_bytes(intro, p1_budget)
-        p2_body = _truncate_words_bytes(summary, p2_budget)
-        return [_with_part_marker(1, 2, p1_body), _with_part_marker(2, 2, p2_body)]
+        return _split_complete_message(one_part, max_bytes)
     if locations:
-        return [format_alert(alert.event, locations, alert.ends, tz_name, onset_iso=alert.onset, max_bytes=max_bytes)]
-    return [format_alert(alert.event, alert.area_desc, alert.ends, tz_name,
-                         onset_iso=alert.onset, sep="for", max_bytes=max_bytes)]
+        return _split_complete_message(format_alert(alert.event, locations, alert.ends, tz_name, onset_iso=alert.onset, max_bytes=max_bytes), max_bytes)
+    return _split_complete_message(format_alert(alert.event, alert.area_desc, alert.ends, tz_name,
+                         onset_iso=alert.onset, sep="for", max_bytes=max_bytes), max_bytes)
 
 
 def fmt_local(iso: str, tz_name: str = "Australia/Sydney") -> str:

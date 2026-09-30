@@ -15,7 +15,7 @@ MeshCore BOM Weather polls official Australian Bureau of Meteorology warning RSS
 - Configurable Australian IANA timezone display.
 - MeshCore over USB serial or TCP.
 - BOM warning filtering, update/cancellation handling, and deduplication.
-- 195-byte MeshCore payload limit.
+- MeshCore channel messages are limited to 160 bytes including the companion name and `: `; WXEcho uses the connected name to size text and splits long alerts before sending.
 - Dry-run mode, history, transmit log, error log, and dashboard health status.
 
 ## Install
