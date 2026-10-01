@@ -8,11 +8,13 @@
     <label class="chk"><input type="checkbox" name="bom_enabled" value="1" {% if s.bom_enabled %}checked{% endif %}> Enable BOM monitoring</label>
     <p class="hint">Only the New South Wales BOM warning feed is monitored. Council matching applies to NSW warnings only.</p>
     <div class="grp-title">Council areas</div>
-    <label class="chk"><input type="checkbox" name="bom_all_councils" value="1" {% if s.bom_all_councils %}checked{% endif %}> All NSW council areas</label>
+    <label class="chk"><input type="checkbox" name="bom_all_councils" value="1" data-council-toggle {% if s.bom_all_councils %}checked{% endif %}> All NSW council areas</label>
     <p class="hint">Select one or more councils below if All NSW is off. Warnings with an unknown council match can still be included using the option below.</p>
-    <label>Find a council</label><input type="search" placeholder="Search council areas" oninput="document.querySelectorAll('#bom-councils label').forEach(e => e.hidden = !e.textContent.toLowerCase().includes(this.value.toLowerCase()))">
+    <div data-council-options class="council-choices{% if s.bom_all_councils %} is-disabled{% endif %}" aria-disabled="{{ 'true' if s.bom_all_councils else 'false' }}">
+    <label>Find a council</label><input type="search"{% if s.bom_all_councils %} disabled{% endif %} placeholder="Search council areas" oninput="document.querySelectorAll('#bom-councils label').forEach(e => e.hidden = !e.textContent.toLowerCase().includes(this.value.toLowerCase()))">
     <div class="checkgrid" id="bom-councils" style="max-height:320px;overflow:auto;margin-top:12px;">
-      {% for council in councils %}<label class="chk"><input type="checkbox" name="bom_councils" value="{{ council }}" {% if council in selected_councils %}checked{% endif %}> {{ council }}</label>{% endfor %}
+      {% for council in councils %}<label class="chk"><input type="checkbox" name="bom_councils" value="{{ council }}"{% if s.bom_all_councils %} disabled{% endif %} {% if council in selected_councils %}checked{% endif %}> {{ council }}</label>{% endfor %}
+    </div>
     </div>
     <label class="chk" style="margin-top:12px;"><input type="checkbox" name="bom_include_unknown_councils" value="1" {% if s.bom_include_unknown_councils %}checked{% endif %}> Include NSW warnings when the affected councils cannot be determined</label>
     <label style="margin-top:12px;">Forecast districts (optional, one per line or comma-separated)</label>
@@ -69,6 +71,7 @@
   <button type="submit">Save settings</button>
 </form>
 
+{% include "_council_choices_script.html" %}
 <script>
 (function () {
   const allWarnings = document.querySelector('[name="all_warnings"]');

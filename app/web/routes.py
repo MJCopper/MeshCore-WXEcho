@@ -504,7 +504,8 @@ async def save_bom_settings(request: Request, poll_interval: int = Form(...),
     db = _db(request)
     db.set_setting("bom_enabled", bool(bom_enabled))
     db.set_setting("bom_all_councils", bool(bom_all_councils))
-    db.set_setting("bom_councils", [name for name in COUNCILS if name in bom_councils])
+    if not bom_all_councils or bom_councils:
+        db.set_setting("bom_councils", [name for name in COUNCILS if name in bom_councils])
     db.set_setting("bom_include_unknown_councils", bool(bom_include_unknown_councils))
     db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
     minutes = max(MIN_POLL_MINUTES, int(poll_interval))
@@ -575,7 +576,8 @@ async def save_settings(
 
     db.set_setting("bom_enabled", bool(bom_enabled))
     db.set_setting("bom_all_councils", bool(bom_all_councils))
-    db.set_setting("bom_councils", [name for name in COUNCILS if name in bom_councils])
+    if not bom_all_councils or bom_councils:
+        db.set_setting("bom_councils", [name for name in COUNCILS if name in bom_councils])
     db.set_setting("bom_include_unknown_councils", bool(bom_include_unknown_councils))
     db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
     db.set_setting("bom_poll_minutes", interval)

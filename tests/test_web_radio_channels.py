@@ -374,6 +374,21 @@ def test_settings_hub_links_to_independent_sections():
     assert 'href="/meshcore/settings"' in body
 
 
+def test_bom_all_nsw_disables_individual_controls_and_keeps_choices():
+    client, db, _ = _client({
+        "bom_all_councils": True, "bom_councils": ["Tamworth Regional"],
+    })
+    page = client.get("/settings/bom").text
+    assert 'data-council-options class="council-choices is-disabled" aria-disabled="true"' in page
+    assert 'name="bom_councils" value="Tamworth Regional" disabled checked' in page
+    assert "updateCouncilChoices()" in page
+    response = client.post("/settings/bom", data={
+        "poll_interval": "5", "bom_enabled": "1", "bom_all_councils": "1",
+    }, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("bom_councils") == ["Tamworth Regional"]
+
+
 def test_bom_and_meshcore_settings_save_independently():
     client, db, tx = _client({
         "meshcore_channel": 2, "meshcore_test_channel": 3,

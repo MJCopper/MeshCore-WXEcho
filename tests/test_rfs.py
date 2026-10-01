@@ -119,6 +119,15 @@ def test_rfs_page_offers_all_councils_and_saves_selection():
     assert db.get_setting("rfs_poll_minutes") == 10
     client.post("/settings/rfs", data={"rfs_poll_minutes": "2"}, follow_redirects=False)
     assert db.get_setting("rfs_poll_minutes") == 5
+    db.set_setting("rfs_councils", ["Central Coast"])
+    db.set_setting("rfs_all_councils", True)
+    page = client.get("/settings/rfs").text
+    assert 'data-council-options class="council-choices is-disabled" aria-disabled="true"' in page
+    assert 'name="rfs_councils" value="Central Coast" disabled checked' in page
+    assert "updateCouncilChoices()" in page
+    client.post("/settings/rfs", data={"rfs_enabled": "1", "rfs_all_councils": "1"},
+                follow_redirects=False)
+    assert db.get_setting("rfs_councils") == ["Central Coast"]
     db.close()
 
 

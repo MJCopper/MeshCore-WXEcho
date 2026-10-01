@@ -13,11 +13,13 @@
       {% for level in levels %}<label class="chk"><input type="checkbox" name="rfs_levels" value="{{ level }}" {% if level in selected_levels %}checked{% endif %}> {{ level }}</label>{% endfor %}
     </div>
     <div class="grp-title">Council areas</div>
-    <label class="chk"><input type="checkbox" name="rfs_all_councils" value="1" {% if s.rfs_all_councils %}checked{% endif %}> All NSW council areas</label>
+    <label class="chk"><input type="checkbox" name="rfs_all_councils" value="1" data-council-toggle {% if s.rfs_all_councils %}checked{% endif %}> All NSW council areas</label>
     <p class="hint">Select one or more councils below if All NSW is off. An incident without a matching council will not be broadcast.</p>
-    <label>Find a council</label><input id="rfs-council-search" type="search" placeholder="Search council areas" oninput="filterCouncils()">
+    <div data-council-options class="council-choices{% if s.rfs_all_councils %} is-disabled{% endif %}" aria-disabled="{{ 'true' if s.rfs_all_councils else 'false' }}">
+    <label>Find a council</label><input id="rfs-council-search" type="search"{% if s.rfs_all_councils %} disabled{% endif %} placeholder="Search council areas" oninput="document.querySelectorAll('#rfs-councils label').forEach(e => e.hidden = !e.textContent.toLowerCase().includes(this.value.toLowerCase()))">
     <div class="checkgrid" id="rfs-councils" style="max-height:320px;overflow:auto;margin-top:12px;">
-      {% for council in councils %}<label class="chk"><input type="checkbox" name="rfs_councils" value="{{ council }}" {% if council in selected_councils %}checked{% endif %}> {{ council }}</label>{% endfor %}
+      {% for council in councils %}<label class="chk"><input type="checkbox" name="rfs_councils" value="{{ council }}"{% if s.rfs_all_councils %} disabled{% endif %} {% if council in selected_councils %}checked{% endif %}> {{ council }}</label>{% endfor %}
+    </div>
     </div>
   </div>
   <div class="panel">
@@ -27,4 +29,5 @@
   </div>
   <button type="submit">Save RFS settings</button>
 </form>
+{% include "_council_choices_script.html" %}
 {% endblock %}

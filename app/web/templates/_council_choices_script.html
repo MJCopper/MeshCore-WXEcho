@@ -1,0 +1,31 @@
+<script>
+(function () {
+  const all = document.querySelector('[data-council-toggle]');
+  const group = document.querySelector('[data-council-options]');
+  if (!all || !group) return;
+  const form = all.closest('form');
+  const controls = group.querySelectorAll('input');
+  const search = group.querySelector('input[type="search"]');
+
+  function updateCouncilChoices() {
+    const disabled = all.checked;
+    group.classList.toggle('is-disabled', disabled);
+    group.setAttribute('aria-disabled', String(disabled));
+    controls.forEach(control => { control.disabled = disabled; });
+    if (disabled && search) {
+      search.value = '';
+      group.querySelectorAll('.checkgrid label').forEach(label => { label.hidden = false; });
+    }
+  }
+
+  all.addEventListener('change', updateCouncilChoices);
+  form.addEventListener('submit', () => {
+    if (all.checked) {
+      group.querySelectorAll('input[type="checkbox"]:checked').forEach(box => {
+        box.disabled = false;
+      });
+    }
+  });
+  updateCouncilChoices();
+})();
+</script>

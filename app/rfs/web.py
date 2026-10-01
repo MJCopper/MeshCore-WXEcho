@@ -46,7 +46,8 @@ async def save_rfs_settings(request: Request,
     db.set_setting("rfs_enabled", bool(rfs_enabled))
     db.set_setting("rfs_poll_minutes", max(5, int(rfs_poll_minutes)))
     db.set_setting("rfs_all_councils", bool(rfs_all_councils))
-    db.set_setting("rfs_councils", [x for x in COUNCILS if x in rfs_councils])
+    if not rfs_all_councils or rfs_councils:
+        db.set_setting("rfs_councils", [name for name in COUNCILS if name in rfs_councils])
     db.set_setting("rfs_levels", [x for x in LEVELS if x in rfs_levels])
     request.app.state.rfs_poller.poke()
     db.add_event("INFO", "NSW RFS settings saved")

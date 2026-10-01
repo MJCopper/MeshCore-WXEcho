@@ -149,7 +149,7 @@ class TrafficPoller:
                               detail="Existing item on first live poll; no radio send")
                 self.db.traffic_mark_sent(item.item_id, item.revision)
                 continue
-            queue_depth = getattr(self.tx, "queue_depth", lambda: 0)()
+            queue_depth = getattr(self.tx, "queue_depth", 0)
             if queue_depth + len(parts) > QUEUE_MAX - 4:
                 if not latest or latest["revision_hash"] != item.revision or latest["disposition"] != "deferred-queue":
                     self._history(item, council, text=message, disposition="deferred-queue",

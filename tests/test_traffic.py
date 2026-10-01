@@ -37,6 +37,7 @@ class Client:
 
 class Tx:
     message_budget = 145
+    queue_depth = 0
 
     def __init__(self):
         self.sent = []
@@ -158,6 +159,15 @@ def test_traffic_settings_page_and_save():
     assert db.get_setting("traffic_poll_minutes") == 5
     client.post("/settings/traffic", data={"traffic_poll_minutes": "17"}, follow_redirects=False)
     assert db.get_setting("traffic_poll_minutes") == 17
+    db.set_setting("traffic_councils", ["Central Coast"])
+    db.set_setting("traffic_all_councils", True)
+    page = client.get("/settings/traffic").text
+    assert 'data-council-options class="council-choices is-disabled" aria-disabled="true"' in page
+    assert 'name="traffic_councils" value="Central Coast" disabled checked' in page
+    assert "updateCouncilChoices()" in page
+    client.post("/settings/traffic", data={"traffic_enabled": "1", "traffic_all_councils": "1"},
+                follow_redirects=False)
+    assert db.get_setting("traffic_councils") == ["Central Coast"]
     db.close()
 
 

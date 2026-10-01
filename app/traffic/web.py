@@ -41,7 +41,8 @@ async def save_traffic_settings(request: Request,
     db.set_setting("traffic_enabled", bool(traffic_enabled))
     db.set_setting("traffic_poll_minutes", max(5, int(traffic_poll_minutes)))
     db.set_setting("traffic_all_councils", bool(traffic_all_councils))
-    db.set_setting("traffic_councils", [x for x in COUNCILS if x in traffic_councils])
+    if not traffic_all_councils or traffic_councils:
+        db.set_setting("traffic_councils", [name for name in COUNCILS if name in traffic_councils])
     db.set_setting("traffic_types", [x for x in TYPES if x in traffic_types])
     request.app.state.traffic_poller.poke()
     db.add_event("INFO", "Live Traffic NSW settings saved")
