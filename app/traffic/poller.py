@@ -35,6 +35,7 @@ class TrafficPoller:
         self.event = asyncio.Event()
         self._poke_generation = 0
         self.last_poll = ""
+        self.last_successful_poll = ""
         self.last_result = "not polled"
         self._councils = None
 
@@ -65,6 +66,7 @@ class TrafficPoller:
                 raise
             except Exception as exc:
                 logger.exception("Traffic poll failed")
+                self.last_poll = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 self.last_result = f"error: {exc}"
                 self.db.add_error("traffic", str(exc))
             if self._poke_generation != generation:
@@ -90,6 +92,7 @@ class TrafficPoller:
                 polygons = await self.client.boundaries()
                 self._councils = await asyncio.to_thread(prepare_councils, polygons)
         except (TrafficFeedError, KeyError) as exc:
+            self.last_poll = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.last_result = f"error: {exc}"
             self.db.add_error("traffic", str(exc))
             return
@@ -182,6 +185,7 @@ class TrafficPoller:
             self.db.set_setting("traffic_baseline_done", True)
         if queued:
             self._queue_verification()
+        self.last_successful_poll = self.last_poll
 
     def _history(self, item, council: str, text: str = "", status=None,
                  disposition: str = "", detail: str = "") -> int:

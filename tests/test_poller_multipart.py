@@ -13,6 +13,9 @@ class _FakeDb:
         self.errors = []
         self.settings = {}
 
+    def all_settings(self):
+        return dict(self.settings)
+
     def get_setting(self, key, default=None):
         return self.settings.get(key, default)
 
@@ -29,7 +32,7 @@ class _FakeDb:
         return None
 
     def add_history(self, alert_id, event, area, disposition, transmitted_text="", detail="",
-                    transmit_status=None, revision_hash=""):
+                    transmit_status=None, revision_hash="", metadata=None):
         row_id = len(self.history_rows) + 1
         self.history_rows.append(
             {
@@ -42,6 +45,7 @@ class _FakeDb:
                 "detail": detail,
                 "transmit_status": transmit_status,
                 "revision_hash": revision_hash,
+                "metadata": metadata or {},
             }
         )
         return row_id

@@ -377,13 +377,14 @@ def test_settings_hub_links_to_independent_sections():
 def test_bom_and_meshcore_settings_save_independently():
     client, db, tx = _client({
         "meshcore_channel": 2, "meshcore_test_channel": 3,
-        "bom_regions": ["NSW"], "poll_interval": 120,
+        "poll_interval": 120,
     })
     response = client.post("/settings/bom", data={
-        "poll_interval": "3", "bom_regions": "VIC", "events": "Flood Watch",
+        "poll_interval": "3", "bom_all_councils": "", "bom_councils": "Tamworth Regional",
+        "bom_include_unknown_councils": "1", "events": "Flood Watch",
     }, follow_redirects=False)
     assert response.status_code == 303
-    assert db.get_setting("bom_regions") == ["VIC"]
+    assert db.get_setting("bom_councils") == ["Tamworth Regional"]
     assert db.get_setting("bom_poll_minutes") == 5
     assert db.get_setting("poll_interval") == 300
     assert db.get_setting("meshcore_channel") == 2
@@ -394,7 +395,7 @@ def test_bom_and_meshcore_settings_save_independently():
     }, follow_redirects=False)
     assert response.status_code == 303
     assert db.get_setting("meshcore_channel") == 4
-    assert db.get_setting("bom_regions") == ["VIC"]
+    assert db.get_setting("bom_councils") == ["Tamworth Regional"]
     assert ("reconfigure",) in tx.calls
 
 

@@ -85,9 +85,9 @@ async def test_fixed_link_revisions_reach_history_and_dashboard(tmp_path, monkey
     assert history.text.count('class="rec"') == 2
     assert "Unchanged polls do not add entries" in history.text
     assert dashboard.status_code == 200
-    assert "Recent alerts" in dashboard.text
-    assert "Latest recorded revision of each alert" in dashboard.text
-    assert dashboard.text.count('class="arow"') == 1
+    assert "Recent Notices" in dashboard.text
+    assert "Successfully transmitted by this device" in dashboard.text
+    assert "No notices transmitted yet." in dashboard.text
     assert "Earlier revision" in history.text
     db.close()
 

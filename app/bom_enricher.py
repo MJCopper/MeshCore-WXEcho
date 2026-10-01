@@ -21,6 +21,8 @@ class BOMEnrichment:
     locations: str = ""
     summary: str = ""
     sections: tuple["WarningSection", ...] = ()
+    area_names: tuple[str, ...] = ()
+    polygons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,8 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
     summaries = []
     locations = ""
     geocodes = []
+    area_names = []
+    polygons = []
     for item in info:
         summary = _strip_markup(item.get("summary", ""))
         if summary:
@@ -108,10 +112,19 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
             if match and not locations:
                 locations = _clean_sentence(match.group(1), 110)
         for area in item.get("area", []) or []:
+            area_name = _strip_markup(area.get("area_desc", ""))
+            if area_name and area_name not in area_names:
+                area_names.append(area_name)
             for code in area.get("geocode", []) or []:
                 name = (code.get("name") or "").strip()
                 if name and name not in geocodes:
                     geocodes.append(name)
+            raw_polygons = area.get("polygon", []) or []
+            if isinstance(raw_polygons, str):
+                raw_polygons = [raw_polygons]
+            for polygon in raw_polygons:
+                if isinstance(polygon, str) and polygon not in polygons:
+                    polygons.append(polygon)
     if not locations:
         locations = _clean_sentence(
             _strip_markup(warning.get("area_summary", "")), 110)
@@ -136,7 +149,8 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
             phase=str(item.get("phase") or ""),
             onset=str(item.get("onset_datetime_utc") or ""),
         ))
-    return BOMEnrichment(locations=locations, summary=summary, sections=tuple(sections))
+    return BOMEnrichment(locations=locations, summary=summary, sections=tuple(sections),
+                         area_names=tuple(area_names or geocodes), polygons=tuple(polygons))
 
 
 def _warning_api_url(url: str) -> str:

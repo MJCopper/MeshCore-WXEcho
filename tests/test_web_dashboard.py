@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.db import Database
 from app.transmit import TransmitManager
 from app.web.routes import _dash_ctx, router
 
@@ -96,19 +97,49 @@ def test_dashboard_counts_only_confirmed_meshcore_broadcasts():
 
     assert context["sent_7d"] == 1
     assert context["sent_today"] == 1
-    assert context["recent"][0]["transmit_status"] == "success"
+    assert [row["transmit_status"] for row in context["recent"]] == ["success"]
 
 
-def test_dashboard_coverage_uses_states_and_forecast_districts():
+def test_recent_notices_only_show_successful_sends_across_services():
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rows = []
+    for index, source in enumerate(["bom", "rfs", "rfs", "rfs", "rfs", "traffic", "traffic"], 1):
+        rows.append({"id": index, "ts": now, "source": source,
+                     "external_id": f"{source}-{index}", "title": f"Notice {index}",
+                     "area": "NSW", "disposition": "sent", "transmit_status": "success",
+                     "detail": "", "transmitted_text": f"text {index}"})
+    rows.append(dict(rows[-1], id=8, title="Dry Run", transmit_status="dry-run"))
+    rows.append(dict(rows[-1], id=9, title="Failed", transmit_status="failed"))
+    db = DashboardDB()
+    db.query_service_history = lambda **kwargs: rows[:kwargs.get("limit", len(rows))]
     request = SimpleNamespace(app=SimpleNamespace(
-        state=SimpleNamespace(db=DashboardDB(), tx=DashboardTx(), poller=DashboardPoller())
+        state=SimpleNamespace(db=db, tx=DashboardTx(), poller=DashboardPoller())
     ))
+    recent = _dash_ctx(request)["recent"]
+    assert len(recent) == 6
+    assert all(row["transmit_status"] == "success" for row in recent)
+    assert sum(row["source"] == "NSW RFS" for row in recent) == 4
+    assert recent[0]["event"] == "Notice 7"
 
+
+def test_dashboard_describes_all_three_services():
+    db = DashboardDB()
+    db.settings.update({"rfs_enabled": True, "rfs_poll_minutes": 15,
+                        "traffic_enabled": True, "traffic_poll_minutes": 20})
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        db=db, tx=DashboardTx(), poller=DashboardPoller(),
+        rfs_poller=SimpleNamespace(last_poll=now, last_successful_poll=now,
+                                   last_result="ok: 2 RFS incidents"),
+        traffic_poller=SimpleNamespace(last_poll=now, last_successful_poll=now,
+                                       last_result="ok: 10 traffic items"),
+    )))
     context = _dash_ctx(request)
-
-    assert context["state_count"] == 1
-    assert context["district_count"] == 0
-    assert context["all_districts"] is True
+    assert [service["label"] for service in context["enabled_services"]] == [
+        "BOM", "NSW RFS", "Live Traffic NSW"]
+    assert [service["interval"] for service in context["services"]] == [5, 15, 20]
+    assert context["services"][1]["state"] == "ok"
+    assert context["services"][2]["state"] == "ok"
 
 
 def test_meshcore_status_exposes_configured_target():
@@ -129,8 +160,10 @@ def test_dashboard_and_history_render_populated_data():
     history = client.get("/history")
 
     assert dashboard.status_code == 200
-    assert "Watching 1 state/territory feed" in dashboard.text
-    assert "all forecast districts" in dashboard.text
+    assert "Recent Notices" in dashboard.text
+    assert "Successfully transmitted by this device" in dashboard.text
+    assert "NSW RFS" in dashboard.text
+    assert "Live Traffic NSW" in dashboard.text
     assert "/dev/serial/by-id/usb-Seeed_XIAO-if00" in dashboard.text
     assert "transmitted" in dashboard.text
     assert history.status_code == 200
@@ -146,5 +179,17 @@ def test_disabled_bom_does_not_raise_missing_feed_health_warning():
     ))
     context = _dash_ctx(request)
     assert context["bom_enabled"] is False
-    assert context["state_count"] == 0
+    assert context["services"][0]["state"] == "disabled"
     assert not any("BOM poll" in problem for problem in context["health_problems"])
+
+
+def test_successful_activity_counts_all_service_sources():
+    db = Database(":memory:")
+    now = datetime.now(timezone.utc)
+    for source in ("bom", "rfs", "traffic"):
+        db.add_service_history(source, source, source, transmit_status="success")
+    db.add_service_history("traffic", "dry", "Dry Run", transmit_status="dry-run")
+    db.add_service_history("bom", "failed", "Failed", transmit_status="failed")
+    activity = db.successful_service_activity(now)
+    assert activity == {0: 3}
+    db.close()

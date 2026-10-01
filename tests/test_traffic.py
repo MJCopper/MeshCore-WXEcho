@@ -88,6 +88,7 @@ async def test_first_live_poll_is_baseline_then_new_council_sends_current_item()
     client = Client([item()])
     poller = TrafficPoller(db, tx, client)
     await poller.poll_once()
+    assert poller.last_successful_poll == poller.last_poll
     assert tx.sent == []
     assert db.latest_service_history("traffic", "incident:1")["disposition"] == "baseline"
     await poller.poll_once()

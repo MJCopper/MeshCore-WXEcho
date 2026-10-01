@@ -32,7 +32,8 @@ def test_database_data_survives_restart(tmp_path):
 
     reopened = Database(path)
 
-    assert reopened.get_setting("bom_regions") == ["NSW", "ACT"]
+    assert reopened.get_setting("bom_regions") is None
+    assert reopened.get_setting("bom_all_councils") is True
     assert reopened.get_state("IDN21001")["msg_hash"] == "abc123"
     assert reopened.query_history()[0]["transmit_status"] == "success"
     assert reopened.query_transmit_log()[0]["transport"] == "meshcore"

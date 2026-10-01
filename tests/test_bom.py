@@ -69,25 +69,21 @@ def test_invalid_bom_xml_raises():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_fetch_keeps_successful_regions_when_one_feed_fails():
+async def test_fetch_accepts_only_nsw_feed():
     route = respx.get(BOM_BASE_URL + BOM_FEEDS["NSW"]).mock(
         return_value=httpx.Response(200, text=FIXTURE.read_text())
     )
-    respx.get(BOM_BASE_URL + BOM_FEEDS["VIC"]).mock(
-        return_value=httpx.Response(503, text="unavailable")
-    )
     client = BOMClient()
-
-    alerts, raw = await client.fetch_active(["NSW", "VIC"])
-
+    alerts, raw = await client.fetch_active(["NSW"])
     assert len(alerts) == 2
+    assert client.last_successful_regions == {"NSW"}
     assert route.calls.last.request.headers["user-agent"] == BOM_USER_AGENT
     assert "Firefox/" in BOM_USER_AGENT
     assert "MeshCore" not in BOM_USER_AGENT
     assert "WXEcho" not in BOM_USER_AGENT
     assert "Severe Thunderstorm Warning" in raw
-    assert len(client.last_errors) == 1
-    assert client.last_errors[0].startswith("VIC: Server error '503 Service Unavailable'")
+    with pytest.raises(BOMError, match="unknown BOM feed region"):
+        await client.fetch_active(["VIC"])
 
 
 @pytest.mark.asyncio

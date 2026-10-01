@@ -32,6 +32,7 @@ class RFSPoller:
         self.task = None
         self.event = asyncio.Event()
         self.last_poll = ""
+        self.last_successful_poll = ""
         self.last_result = "not polled"
         self._poke_generation = 0
 
@@ -62,6 +63,7 @@ class RFSPoller:
                 raise
             except Exception as exc:
                 logger.exception("RFS poll failed")
+                self.last_poll = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 self.last_result = f"error: {exc}"
                 self.db.add_error("rfs", str(exc))
             if self._poke_generation != generation:
@@ -158,6 +160,7 @@ class RFSPoller:
             )
         if queued:
             self._queue_verification(dry_run)
+        self.last_successful_poll = self.last_poll
 
     def _queue_verification(self, dry_run: bool):
         budget = getattr(self.tx, "message_budget", MAX_PAYLOAD_BYTES)

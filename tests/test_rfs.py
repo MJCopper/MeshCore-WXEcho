@@ -90,6 +90,7 @@ async def test_rfs_dry_run_previews_without_radio_send():
     poller = RFSPoller(db, tx, FakeClient([incident(level="Emergency Warning"),
                                                  incident("act", "ACT", "Emergency Warning")]))
     await poller.poll_once()
+    assert poller.last_successful_poll == poller.last_poll
     assert tx.sent == []
     assert len(db.rfs_history()) == 2
     assert any(row["transmit_status"] == "dry-run" for row in db.rfs_history())

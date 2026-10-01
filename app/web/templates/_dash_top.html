@@ -13,7 +13,7 @@
     <div>
       <h2 class="pt">Dashboard</h2>
       {% set rnames = transports | selectattr('enabled') | map(attribute='label') | list %}
-      <p class="sub">BOM &rarr; {{ rnames | join(' + ') if rnames else 'no radios' }}</p>
+      <p class="sub">{{ enabled_services|map(attribute='label')|join(' + ') if enabled_services else 'No monitoring services enabled' }} &rarr; {{ rnames | join(' + ') if rnames else 'no radios' }}</p>
     </div>
     <div class="topbar-right">
       <span class="live-pill{{ ' paused' if dry_run else '' }}"><span class="dot"></span>{{ "PAUSED" if dry_run else "Broadcasting LIVE" }}</span>
@@ -27,7 +27,7 @@
     <div class="hero-top">
       <div>
         <div class="hlbl">Broadcaster status</div>
-        <h2 class="hero-h">{% if bom_enabled %}Watching {{ state_count }} state/territory feed{{ '' if state_count == 1 else 's' }} &middot; every {{ poll_interval }} min{% else %}BOM monitoring disabled{% endif %}</h2>
+        <h2 class="hero-h">{% if enabled_services %}Monitoring {{ enabled_services|length }} service{{ '' if enabled_services|length == 1 else 's' }}{% else %}No monitoring services enabled{% endif %}</h2>
       </div>
       <div class="hero-right">
         <div class="m"><div class="k">Last poll</div><div class="v">{{ last_poll_local }}</div></div>
@@ -52,12 +52,14 @@
   </section>
 
   <section class="dstats">
-    <div class="dstat"><div class="top"><svg viewBox="0 0 24 24"><path d="M12 21s-7-5.5-7-11a7 7 0 0114 0c0 5.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.4"/></svg><span class="t">Coverage</span></div>
-      <div class="big">{{ state_count }}</div><div class="s2">{% if all_districts %}all forecast districts{% else %}{{ district_count }} forecast district{{ '' if district_count == 1 else 's' }}{% endif %}</div></div>
-    <div class="dstat"><div class="top"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span class="t">Poll interval</span></div>
-      <div class="big">{{ poll_interval }}<span class="unit">min</span></div><div class="s2">every cycle, automatic</div></div>
-    <div class="dstat"><div class="top"><svg viewBox="0 0 24 24"><path d="M4 8a12 12 0 0116 0"/><path d="M7 12a7 7 0 0110 0"/><circle cx="12" cy="16" r="1.6" fill="currentColor" stroke="none"/></svg><span class="t">Broadcast &middot; 7d</span></div>
-      <div class="big">{{ sent_7d }}</div><div class="s2">{{ sent_today }} today</div></div>
+    {% for service in services %}
+    <div class="dstat">
+      <div class="top"><span class="t"><a href="{{ service.url }}">{{ service.label }}</a></span></div>
+      <div class="big" style="color:{{ 'var(--muted)' if not service.enabled else ('var(--bad)' if service.state in ('error', 'stale') else 'var(--good)') }};">{{ 'On' if service.enabled else 'Off' }}</div>
+      <div class="s2">{{ service.state }}{% if service.enabled %} · every {{ service.interval }} min<br>Last successful poll: {{ service.last_success }}<br>{{ service.result|truncate(90) }}{% endif %}</div>
+      <div class="s2"><a href="{{ service.settings_url }}">Settings &rarr;</a></div>
+    </div>
+    {% endfor %}
     <div class="dstat"><div class="top"><svg viewBox="0 0 24 24"><path d="M4 8a12 12 0 0116 0"/><path d="M7 12a7 7 0 0110 0"/></svg><span class="t">Radios online</span></div>
       {% set active = transports | selectattr('enabled') | list %}
       {% set nconn = active | selectattr('connected') | list | length %}

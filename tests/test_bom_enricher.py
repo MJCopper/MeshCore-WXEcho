@@ -37,6 +37,15 @@ def test_api_detail_extracts_locations_and_summary():
     assert result.summary.startswith("Locations which may be affected")
 
 
+def test_api_detail_retains_area_names_and_cap_polygons():
+    result = parse_warning_api({"warning": {"info": [{"area": [{
+        "area_desc": "Tamworth Regional",
+        "polygon": "-31,150 -31,151 -30,151 -30,150",
+    }]}]}})
+    assert result.area_names == ("Tamworth Regional",)
+    assert result.polygons == ("-31,150 -31,151 -30,151 -30,150",)
+
+
 @pytest.mark.asyncio
 async def test_enricher_caches_successful_api_detail():
     with respx.mock() as router:

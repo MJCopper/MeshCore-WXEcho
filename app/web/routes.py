@@ -1,6 +1,7 @@
 """Web UI routes (server-rendered templates + htmx partials)."""
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__
 from ..config import MAX_PAYLOAD_BYTES, MIN_POLL_MINUTES, polling_seconds
-from ..bom import BOM_FEEDS
+from ..rfs.councils import COUNCILS
 from ..meshcore_discovery import list_usb_serial_devices
 
 
@@ -121,8 +122,6 @@ def _spark(counts):
 def _dash_ctx(request) -> dict:
     db, tx, poller = _db(request), _tx(request), _poller(request)
     tz = db.get_setting("display_timezone", "")
-    regions = list(db.get_setting("bom_regions", ["NSW"]) or [])
-    zones = list(db.get_setting("bom_districts", []) or [])
     port = tx.port or ""
     device = "Heltec V3" if ("CP210" in port or "Silicon_Labs" in port) else (port.split("/")[-1] if port else "(none)")
     up = poller.status.uptime_seconds
@@ -134,41 +133,39 @@ def _dash_ctx(request) -> dict:
             return (now - datetime.datetime.fromisoformat(ts)).total_seconds() / 86400.0
         except Exception:
             return 999
-    rows = (db.query_service_history(limit=1000) if hasattr(db, "query_service_history")
-            else db.query_history(limit=1000))
-    sent = [r for r in rows if r["transmit_status"] == "success"]
-    sent_7d = sum(1 for r in sent if _age(r["ts"]) < 7)
-    sent_today = sum(1 for r in sent if _age(r["ts"]) < 1)
-    buckets = [0] * 7
-    for r in sent:
-        a = _age(r["ts"])
-        if 0 <= a < 7:
-            buckets[6 - int(a)] += 1
+    if hasattr(db, "successful_service_activity"):
+        activity = db.successful_service_activity(now)
+        sent_7d = sum(activity.values())
+        sent_today = activity.get(0, 0)
+        buckets = [activity.get(6 - index, 0) for index in range(7)]
+    else:
+        rows = (db.query_service_history(limit=1000) if hasattr(db, "query_service_history")
+                else db.query_history(limit=1000))
+        sent = [r for r in rows if r["transmit_status"] == "success"]
+        sent_7d = sum(1 for r in sent if _age(r["ts"]) < 7)
+        sent_today = sum(1 for r in sent if _age(r["ts"]) < 1)
+        buckets = [0] * 7
+        for r in sent:
+            age = _age(r["ts"])
+            if 0 <= age < 7:
+                buckets[6 - int(age)] += 1
     spark_line, spark_fill = _spark(buckets)
-    include = list(db.get_setting("filter_include_exact", []) or [])
-    if db.get_setting("filter_include_suffix", []):
-        include = ["All Warnings"] + include
     recent_rows = []
     seen_items = set()
-    source_counts = {}
-    candidates = (db.query_service_history(limit=2000) if hasattr(db, "query_service_history")
-                  else db.query_history(limit=200))
-    for r in candidates:
-        keys = r.keys()
-        source = r["source"] if "source" in keys else "bom"
-        external_id = r["external_id"] if "external_id" in keys else r.get("alert_id", "")
+    candidates = (db.query_service_history(transmit_status="success", limit=2000)
+                  if hasattr(db, "query_service_history") else db.query_history(limit=200))
+    for r in sorted(candidates, key=lambda row: (row["ts"], row["id"] if "id" in row.keys() else 0),
+                    reverse=True):
+        if r["transmit_status"] != "success":
+            continue
+        source = r["source"] if "source" in r.keys() else "bom"
+        external_id = r["external_id"] if "external_id" in r.keys() else r.get("alert_id", "")
         identity = (source, external_id)
-        if source == "traffic" and (str(r["disposition"]).startswith("excluded-") or
-                                    r["disposition"] in ("baseline", "deferred-queue", "absent-from-feed")):
-            continue
-        if source_counts.get(source, 0) >= 2:
-            continue
         if external_id and identity in seen_items:
             continue
         if external_id:
             seen_items.add(identity)
         recent_rows.append(r)
-        source_counts[source] = source_counts.get(source, 0) + 1
         if len(recent_rows) == 6:
             break
     recent = [{
@@ -185,29 +182,65 @@ def _dash_ctx(request) -> dict:
         # separator could mojibake depending on charset. Keep it plain.
         last_tx = ("OK - " if ltx[0]["success"] else "failed - ") + fmt_local(ltx[0]["ts"], tz)
 
-    # ---- health watchdog: catch SILENT failures (looks live, delivers nothing) --
+    # Each enabled source has its own feed health and interval.
     st = poller.status
-    interval = polling_seconds(db.get_setting("bom_poll_minutes", 5), 5)
     dry = bool(db.get_setting("dry_run", True))
-    bom_enabled = bool(db.get_setting("bom_enabled", True))
     def _age_s(ts):
         try:
             return (now - datetime.datetime.fromisoformat(ts)).total_seconds()
         except Exception:
             return None
-    problems = []          # (level, message); level in {"critical","warn"}
-    # 1. Are we still reaching BOM? A stale success time = we are blind to alerts.
-    succ_age = _age_s(st.last_poll_success_time)
-    stale_after = max(interval * 3, 360)
-    if bom_enabled and succ_age is None:
-        problems.append(("warn", "No successful BOM poll yet."))
-    elif bom_enabled and succ_age > stale_after:
-        problems.append(("critical",
-            "Not reaching BOM: last good poll %d min ago. Not receiving alerts." % (succ_age // 60)))
-    if bom_enabled and st.last_poll_result.startswith("error"):
-        problems.append(("warn", "Last BOM poll errored: %s" % st.last_poll_result[7:][:80]))
-    elif bom_enabled and st.last_poll_result.startswith("partial"):
-        problems.append(("warn", "Some BOM feeds failed: %s" % st.last_poll_result[9:][:80]))
+
+    rfs_poller = getattr(request.app.state, "rfs_poller", None)
+    traffic_poller = getattr(request.app.state, "traffic_poller", None)
+    service_specs = (
+        ("BOM", "bom", "/bom", "/settings/bom", True, 5,
+         st.last_poll_time, st.last_poll_success_time, st.last_poll_result),
+        ("NSW RFS", "rfs", "/rfs", "/settings/rfs", False, 10,
+         getattr(rfs_poller, "last_poll", ""),
+         getattr(rfs_poller, "last_successful_poll", ""),
+         getattr(rfs_poller, "last_result", "not polled")),
+        ("Live Traffic NSW", "traffic", "/traffic", "/settings/traffic", False, 10,
+         getattr(traffic_poller, "last_poll", ""),
+         getattr(traffic_poller, "last_successful_poll", ""),
+         getattr(traffic_poller, "last_result", "not polled")),
+    )
+    services = []
+    problems = []
+    for label, key, url, settings_url, enabled_default, interval_default, last_poll, last_success, result in service_specs:
+        enabled = bool(db.get_setting(f"{key}_enabled", enabled_default))
+        minutes = polling_seconds(db.get_setting(f"{key}_poll_minutes", interval_default),
+                                  interval_default) // 60
+        success_age = _age_s(last_success)
+        stale_after = max(minutes * 180, 360)
+        state = "disabled"
+        if enabled:
+            state = "ok"
+            if result.startswith("select councils"):
+                state = "needs setup"
+                problems.append(("warn", f"{label}: {result}."))
+            elif result.startswith("error"):
+                state = "error"
+                problems.append(("warn", f"{label} poll failed: {result[7:][:80]}"))
+            elif result.startswith("partial"):
+                state = "partial"
+                problems.append(("warn", f"{label} poll partial: {result[9:][:80]}"))
+            if success_age is None:
+                if state == "ok":
+                    state = "waiting"
+                    problems.append(("warn", f"No successful {label} poll yet."))
+            elif success_age > stale_after:
+                state = "stale"
+                problems.append(("critical", f"{label} last successful poll was {int(success_age // 60)} min ago."))
+        services.append({
+            "key": key, "label": label, "url": url, "settings_url": settings_url,
+            "enabled": enabled, "interval": minutes, "result": result,
+            "state": state, "last_success": fmt_local(last_success, tz) if last_success else "Never",
+            "last_poll": fmt_local(last_poll, tz) if last_poll else "Never",
+        })
+    bom_enabled = services[0]["enabled"]
+    enabled_services = [service for service in services if service["enabled"]]
+    latest_poll = max((service[6] for service in service_specs if service[6]), default="")
     # 2. Radios: any enabled radio offline means alerts may not go out.
     radios = tx.status()
     on = [r for r in radios if r["enabled"]]
@@ -243,14 +276,13 @@ def _dash_ctx(request) -> dict:
         "dry_run": bool(db.get_setting("dry_run", True)),
         "connected": tx.connected, "device": device, "tx_error": tx.last_error,
         "channel_index": int(db.get_setting("meshcore_channel", 0)),
-        "bom_enabled": bom_enabled,
-        "state_count": len(regions) if bom_enabled else 0, "district_count": len(zones),
-        "all_districts": not zones,
-        "poll_interval": polling_seconds(db.get_setting("bom_poll_minutes", 5), 5) // 60, "queue_depth": tx.queue_depth,
-        "last_poll_local": fmt_local(poller.status.last_poll_time, tz) if poller.status.last_poll_time else "-",
+        "bom_enabled": bom_enabled, "services": services,
+        "enabled_services": enabled_services,
+        "queue_depth": tx.queue_depth,
+        "last_poll_local": fmt_local(latest_poll, tz) if latest_poll else "-",
         "uptime_str": uptime_str, "sent_7d": sent_7d, "sent_today": sent_today,
         "spark_line": spark_line, "spark_fill": spark_fill,
-        "include": include, "recent": recent, "last_tx": last_tx,
+        "recent": recent, "last_tx": last_tx,
         "transports": tx.status(),
     }
 
@@ -277,7 +309,7 @@ async def status_partial(request: Request):
 
 @router.get("/partials/dashboard", response_class=HTMLResponse)
 async def dashboard_cols_partial(request: Request):
-    # The recent-alerts list + radios + broadcasting columns, for live polling.
+    # Recent successful notices and radio status, for live polling.
     return render(request, "_dash_cols.html", **_dash_ctx(request))
 
 
@@ -422,7 +454,8 @@ async def settings_page(request: Request):
         request, "settings.html", s=s, min_interval=MIN_POLL_MINUTES, ports=list_usb_serial_devices(),
         timezones=_TIMEZONES, tz_current=(s.get("display_timezone", "") or ""),
         tz_known={v for v, _ in _TIMEZONES},
-        event_groups=_EVENT_GROUPS,
+        event_groups=_EVENT_GROUPS, councils=COUNCILS,
+        selected_councils=set(s.get("bom_councils", [])),
         selected_events=set(s.get("filter_include_exact", []) or []),
         all_warnings=bool(s.get("filter_include_suffix", []) or []), err="",
         mc_conn=s.get("meshcore_conn", "serial") or "serial",
@@ -441,11 +474,11 @@ async def settings_page(request: Request):
 @router.get("/bom", response_class=HTMLResponse)
 async def bom_page(request: Request):
     db = _db(request)
-    configured = db.get_setting("bom_regions", ["NSW"]) or list(BOM_FEEDS)
-    regions = [str(region).upper() for region in configured]
+    regions = ["NSW"]
     poll_status = _poller(request).status
     return render(
-        request, "bom.html", items=db.bom_current_items(regions),
+        request, "bom.html", items=[dict(row) | {"matched_councils": json.loads(row["matched_councils"] or "[]")}
+                                    for row in db.bom_current_items(regions)],
         snapshots={row["region"]: row["fetched_at"] for row in db.bom_snapshot_regions(regions)},
         regions=regions, bom_enabled=bool(db.get_setting("bom_enabled", True)),
         bom_status=poll_status.last_poll_result,
@@ -463,12 +496,16 @@ async def bom_settings_page(request: Request):
 @router.post("/settings/bom")
 async def save_bom_settings(request: Request, poll_interval: int = Form(...),
                             bom_enabled: str = Form(""),
-                            bom_regions: list[str] = Form(default=[]),
+                            bom_all_councils: str = Form(""),
+                            bom_councils: list[str] = Form(default=[]),
+                            bom_include_unknown_councils: str = Form(""),
                             bom_districts: str = Form(""), events: list[str] = Form(default=[]),
                             all_warnings: str = Form(""), warning_choices_submitted: str = Form("")):
     db = _db(request)
     db.set_setting("bom_enabled", bool(bom_enabled))
-    db.set_setting("bom_regions", [r.strip().upper() for r in bom_regions if r.strip()])
+    db.set_setting("bom_all_councils", bool(bom_all_councils))
+    db.set_setting("bom_councils", [name for name in COUNCILS if name in bom_councils])
+    db.set_setting("bom_include_unknown_councils", bool(bom_include_unknown_councils))
     db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
     minutes = max(MIN_POLL_MINUTES, int(poll_interval))
     db.set_setting("bom_poll_minutes", minutes)
@@ -515,7 +552,9 @@ async def save_settings(
     poll_interval: int = Form(...),
     bom_enabled: str = Form(""),
     display_timezone: str = Form("Australia/Sydney"),
-    bom_regions: list[str] = Form(default=[]),
+    bom_all_councils: str = Form(""),
+    bom_councils: list[str] = Form(default=[]),
+    bom_include_unknown_councils: str = Form(""),
     bom_districts: str = Form(""),
     events: list[str] = Form(default=[]),
     all_warnings: str = Form(""),
@@ -535,7 +574,9 @@ async def save_settings(
     interval = max(MIN_POLL_MINUTES, int(poll_interval))
 
     db.set_setting("bom_enabled", bool(bom_enabled))
-    db.set_setting("bom_regions", [r.strip().upper() for r in bom_regions if r.strip()])
+    db.set_setting("bom_all_councils", bool(bom_all_councils))
+    db.set_setting("bom_councils", [name for name in COUNCILS if name in bom_councils])
+    db.set_setting("bom_include_unknown_councils", bool(bom_include_unknown_councils))
     db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
     db.set_setting("bom_poll_minutes", interval)
     db.set_setting("poll_interval", interval * 60)

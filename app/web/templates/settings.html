@@ -6,12 +6,15 @@
   <div class="panel">
     <h3>BOM coverage</h3>
     <label class="chk"><input type="checkbox" name="bom_enabled" value="1" {% if s.bom_enabled %}checked{% endif %}> Enable BOM monitoring</label>
-    <p class="hint">Select the Australian state or territory warning feeds to monitor. District names are optional filters applied to those feeds.</p>
-    <div class="checkgrid">
-      {% for code, label in [('NSW', 'New South Wales'), ('ACT', 'Australian Capital Territory'), ('VIC', 'Victoria'), ('QLD', 'Queensland'), ('WA', 'Western Australia'), ('SA', 'South Australia'), ('TAS', 'Tasmania'), ('NT', 'Northern Territory')] %}
-      <label class="chk"><input type="checkbox" name="bom_regions" value="{{ code }}" {% if code in (s.bom_regions or []) %}checked{% endif %}> {{ label }}</label>
-      {% endfor %}
+    <p class="hint">Only the New South Wales BOM warning feed is monitored. Council matching applies to NSW warnings only.</p>
+    <div class="grp-title">Council areas</div>
+    <label class="chk"><input type="checkbox" name="bom_all_councils" value="1" {% if s.bom_all_councils %}checked{% endif %}> All NSW council areas</label>
+    <p class="hint">Select one or more councils below if All NSW is off. Warnings with an unknown council match can still be included using the option below.</p>
+    <label>Find a council</label><input type="search" placeholder="Search council areas" oninput="document.querySelectorAll('#bom-councils label').forEach(e => e.hidden = !e.textContent.toLowerCase().includes(this.value.toLowerCase()))">
+    <div class="checkgrid" id="bom-councils" style="max-height:320px;overflow:auto;margin-top:12px;">
+      {% for council in councils %}<label class="chk"><input type="checkbox" name="bom_councils" value="{{ council }}" {% if council in selected_councils %}checked{% endif %}> {{ council }}</label>{% endfor %}
     </div>
+    <label class="chk" style="margin-top:12px;"><input type="checkbox" name="bom_include_unknown_councils" value="1" {% if s.bom_include_unknown_councils %}checked{% endif %}> Include NSW warnings when the affected councils cannot be determined</label>
     <label style="margin-top:12px;">Forecast districts (optional, one per line or comma-separated)</label>
     <textarea name="bom_districts" rows="4" placeholder="e.g. Illawarra&#10;Hunter&#10;Central Coast">{{ (s.bom_districts or [])|join('\n') }}</textarea>
   </div>

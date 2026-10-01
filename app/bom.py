@@ -19,13 +19,6 @@ class BOMError(RuntimeError):
 BOM_BASE_URL = "https://reg.bom.gov.au"
 BOM_FEEDS = {
     "NSW": "/fwo/IDZ00054.warnings_nsw.xml",
-    "VIC": "/fwo/IDZ00059.warnings_vic.xml",
-    "QLD": "/fwo/IDZ00056.warnings_qld.xml",
-    "WA": "/fwo/IDZ00060.warnings_wa.xml",
-    "SA": "/fwo/IDZ00057.warnings_sa.xml",
-    "TAS": "/fwo/IDZ00058.warnings_tas.xml",
-    "NT": "/fwo/IDZ00055.warnings_nt.xml",
-    "ACT": "/fwo/IDZ00085.warnings_act.xml",
 }
 
 

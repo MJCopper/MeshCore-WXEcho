@@ -129,7 +129,9 @@ BOM_USER_AGENT = (
 
 DEFAULT_SETTINGS: dict = {
     "bom_enabled": True,
-    "bom_regions": ["NSW"],
+    "bom_all_councils": True,
+    "bom_councils": [],
+    "bom_include_unknown_councils": True,
     "bom_districts": [],
     "rfs_enabled": False,
     "rfs_all_councils": False,

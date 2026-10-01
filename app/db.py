@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS bom_current (
     message_type TEXT NOT NULL,
     source_url TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
+    council_match TEXT NOT NULL DEFAULT 'unknown',
+    matched_councils TEXT NOT NULL DEFAULT '[]',
+    match_method TEXT NOT NULL DEFAULT '',
+    selection TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(region, alert_id)
 );
 CREATE TABLE IF NOT EXISTS bom_feed_snapshots (
@@ -80,6 +84,7 @@ CREATE TABLE IF NOT EXISTS service_history (
     UNIQUE(source, legacy_id)
 );
 CREATE INDEX IF NOT EXISTS idx_service_history_ts ON service_history(ts, id);
+CREATE INDEX IF NOT EXISTS idx_service_history_transmitted ON service_history(transmit_status, ts);
 CREATE INDEX IF NOT EXISTS idx_service_history_source ON service_history(source, ts);
 CREATE INDEX IF NOT EXISTS idx_service_history_external ON service_history(source, external_id, id);
 CREATE TABLE IF NOT EXISTS history_migrations (
@@ -202,6 +207,17 @@ class Database:
             }
             if "transport" not in transmit_columns:
                 self._conn.execute("ALTER TABLE transmit_log ADD COLUMN transport TEXT")
+            current_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(bom_current)")}
+            for name, definition in (
+                ("council_match", "TEXT NOT NULL DEFAULT 'unknown'"),
+                ("matched_councils", "TEXT NOT NULL DEFAULT '[]'"),
+                ("match_method", "TEXT NOT NULL DEFAULT ''"),
+                ("selection", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in current_columns:
+                    self._conn.execute(f"ALTER TABLE bom_current ADD COLUMN {name} {definition}")
+            self._conn.execute("DELETE FROM bom_current WHERE region != 'NSW'")
+            self._conn.execute("DELETE FROM bom_feed_snapshots WHERE region != 'NSW'")
             incident_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(rfs_incidents)")}
             if "missing_polls" not in incident_columns:
                 self._conn.execute("ALTER TABLE rfs_incidents ADD COLUMN missing_polls INTEGER NOT NULL DEFAULT 0")
@@ -210,6 +226,21 @@ class Database:
                 "(SELECT alert_id FROM history WHERE transmit_status = 'dry-run')"
             )
             self._migrate_service_history()
+            # Retire only old BOM history with provenance proving another state.
+            non_nsw_bom = (
+                "source = 'bom' AND ((json_extract(metadata, '$.region') IS NOT NULL "
+                "AND json_extract(metadata, '$.region') != 'NSW') OR "
+                "external_id GLOB '*/vic/*' OR external_id GLOB '*/qld/*' OR "
+                "external_id GLOB '*/wa/*' OR external_id GLOB '*/sa/*' OR "
+                "external_id GLOB '*/tas/*' OR external_id GLOB '*/nt/*' OR "
+                "external_id GLOB '*/act/*' OR "
+                "external_id GLOB '*IDV[0-9]*')"
+            )
+            self._conn.execute(
+                f"DELETE FROM alert_state WHERE alert_id IN "
+                f"(SELECT external_id FROM service_history WHERE {non_nsw_bom})"
+            )
+            self._conn.execute(f"DELETE FROM service_history WHERE {non_nsw_bom}")
             self._conn.execute(
                 "DELETE FROM alert_state WHERE alert_id IN "
                 "(SELECT external_id FROM service_history WHERE source = 'bom' "
@@ -278,6 +309,7 @@ class Database:
                     "UPDATE settings SET value = ? WHERE key = 'filter_include_exact'",
                     (json.dumps([]),),
                 )
+            self._conn.execute("DELETE FROM settings WHERE key = 'bom_regions'")
             # Old traffic code cached a multi-megabyte boundary map in settings.
             # The bundled map is now loaded once in memory and indexed there.
             self._conn.execute("DELETE FROM settings WHERE key = 'traffic_boundaries'")
@@ -311,6 +343,7 @@ class Database:
     def replace_bom_current(self, items: list[dict], successful_regions: set[str],
                             fetched_at: str) -> None:
         """Replace only regions fetched successfully; retain failed-region snapshots."""
+        successful_regions = successful_regions & {"NSW"}
         if not successful_regions:
             return
         with self._lock:
@@ -330,11 +363,15 @@ class Database:
                 self._conn.execute(
                     """INSERT OR REPLACE INTO bom_current
                        (region, alert_id, event, headline, area, issued, expires,
-                        message_type, source_url, fetched_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        message_type, source_url, fetched_at, council_match,
+                        matched_councils, match_method, selection)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (region, item["id"], item.get("event", ""), item.get("headline", ""),
                      item.get("area_desc", ""), item.get("effective", ""),
-                     item.get("expires", ""), item.get("message_type", "Alert"), url, fetched_at),
+                     item.get("expires", ""), item.get("message_type", "Alert"), url, fetched_at,
+                     item.get("council_match", "unknown"),
+                     json.dumps(item.get("matched_councils", [])),
+                     item.get("match_method", ""), item.get("selection", "")),
                 )
             self._conn.commit()
 
@@ -452,6 +489,20 @@ class Database:
                 )
             self._conn.commit()
 
+    def successful_service_activity(self, now: datetime) -> dict[int, int]:
+        """Count successful notice sends in rolling 24-hour buckets, newest first."""
+        cutoff = (now - timedelta(days=7)).isoformat(timespec="seconds")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT CAST((? - strftime('%s', ts)) / 86400 AS INTEGER) AS age_days, "
+                "COUNT(*) AS total FROM service_history "
+                "WHERE transmit_status = 'success' AND ts >= ? "
+                "GROUP BY age_days",
+                (int(now.timestamp()), cutoff),
+            ).fetchall()
+        return {int(row["age_days"]): row["total"] for row in rows
+                if row["age_days"] is not None and 0 <= row["age_days"] < 7}
+
     def query_service_history(
         self, source: Optional[str] = None, disposition: Optional[str] = None,
         transmit_status: Optional[str] = None, date_from: Optional[str] = None,
@@ -512,10 +563,11 @@ class Database:
         self, alert_id: str, event: str, area: str, disposition: str,
         transmitted_text: str = "", detail: str = "",
         transmit_status: Optional[str] = None, revision_hash: str = "",
+        metadata: Optional[dict] = None,
     ) -> int:
         return self.add_service_history(
             "bom", alert_id, event, area, disposition, transmitted_text,
-            detail, transmit_status, revision_hash,
+            detail, transmit_status, revision_hash, metadata,
         )
 
     def latest_history(self, alert_id: str):

@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 
 from .bom import BOMClient, BOMError
 from .bom_enricher import BOMWarningEnricher
+from .bom_area import match_councils
 from .config import (
     BURST_GAP_SECONDS,
     FINAL_VERIFICATION_MESSAGE,
@@ -16,10 +19,12 @@ from .config import (
     POLL_HARD_TIMEOUT,
     VERIFICATION_INTERVAL_SECONDS,
 )
-from .dedupe import decide
+from .dedupe import Decision, decide
 from .filters import FilterRules, should_include
 from .formatter import build_mesh_parts, _split_complete_message, append_source_note
 from .models import Alert
+from .rfs.feed import council_key
+from .traffic.feed import TrafficClient, prepare_councils
 
 logger = logging.getLogger("wx_echo.poller")
 
@@ -50,6 +55,7 @@ class BomPoller:
         self._wake_generation = 0
         self._stopped = False
         self._enricher = BOMWarningEnricher()
+        self._council_index = None
 
     def start(self) -> None:
         self._stopped = False
@@ -98,7 +104,7 @@ class BomPoller:
         if not settings.get("bom_enabled", True):
             self.status.last_poll_result = "disabled"
             return
-        regions = settings.get("bom_regions", ["NSW"])
+        regions = ["NSW"]
         client = BOMClient()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
@@ -139,8 +145,9 @@ class BomPoller:
             successful = set(regions or BOM_FEEDS)
             for item in items:
                 item.setdefault("region", next(iter(successful), ""))
-        self._db.replace_bom_current(items, set(successful or ()), now)
-
+        items = [item for item in items if item.get("region", "NSW") == "NSW"]
+        for item in items:
+            item.setdefault("region", "NSW")
         self._db.purge_expired_state()
         self._db.prune_history()
 
@@ -154,17 +161,24 @@ class BomPoller:
             if not self._db.get_setting("bom_enabled", True):
                 break
             try:
-                queued_warning |= bool(await self._process(item, rules, tz_name, channel, dry_run))
+                queued_warning |= bool(await self._process(item, rules, tz_name, channel, dry_run,
+                                                           settings))
             except Exception as exc:
                 logger.exception("error processing BOM warning")
                 self._db.add_error("poller", f"process error: {exc}")
+        self._db.replace_bom_current(items, set(successful or ()) & {"NSW"}, now)
         if queued_warning and self._db.get_setting("bom_enabled", True):
             self._queue_verification(channel, dry_run)
 
-    async def _process(self, item, rules, tz_name, channel, dry_run) -> None:
+    async def _process(self, item, rules, tz_name, channel, dry_run,
+                       settings=None) -> None:
+        if item.get("region", "NSW") != "NSW":
+            return False
         alert = Alert.from_bom(item)
         if not alert.alert_id:
-            return
+            return False
+        settings = settings or self._db.all_settings()
+        enrichment = None
         if alert.message_type != "Cancel" and alert.references and should_include(alert.event, rules):
             enrichment = await self._enricher.enrich(alert.references[0])
             alert.specific_locations = enrichment.locations
@@ -174,6 +188,52 @@ class BomPoller:
         if not self._db.get_setting("bom_enabled", True):
             return False
         decision = decide(alert, rules, self._db.get_state)
+        selected = set(settings.get("bom_councils", []))
+        all_councils = bool(settings.get("bom_all_councils", True))
+        include_unknown = bool(settings.get("bom_include_unknown_councils", True))
+        polygons = tuple(getattr(enrichment, "polygons", ()) or ())
+        if polygons and not all_councils and self._council_index is None:
+            boundaries = await TrafficClient().boundaries()
+            self._council_index = await asyncio.to_thread(prepare_councils, boundaries)
+        match = await asyncio.to_thread(
+            match_councils, alert.area_desc,
+            tuple(getattr(enrichment, "area_names", ()) or ()),
+            polygons, self._council_index)
+        matched_selected = bool({council_key(x) for x in match.councils} &
+                                {council_key(x) for x in selected})
+        latest = self._db.latest_history(alert.alert_id)
+        previous_meta = {}
+        if latest is not None:
+            raw_meta = latest["metadata"]
+            previous_meta = json.loads(raw_meta) if isinstance(raw_meta, str) else (raw_meta or {})
+        selected_keys = {council_key(x) for x in selected}
+        prior_keys = {council_key(x) for x in previous_meta.get("selected_councils", [])}
+        expanded = (previous_meta.get("all_councils") is False and all_councils)
+        expanded |= bool(match.status == "matched" and
+                         {council_key(x) for x in match.councils} & (selected_keys - prior_keys))
+        expanded |= bool(match.status == "unknown" and include_unknown and
+                         previous_meta.get("include_unknown") is False)
+        if (decision.disposition == "duplicate" and previous_meta and expanded):
+            decision = Decision("update", True, "newly selected BOM council coverage")
+        if not all_councils and decision.transmit and decision.disposition != "cancelled":
+            if not selected:
+                decision.transmit = False
+                decision.disposition = "filtered"
+                decision.detail = "no BOM councils selected"
+            elif match.status == "matched" and not matched_selected:
+                decision.transmit = False
+                decision.disposition = "filtered"
+                decision.detail = "outside selected BOM councils"
+            elif match.status == "unknown" and not include_unknown:
+                decision.transmit = False
+                decision.disposition = "filtered"
+                decision.detail = "BOM council match unknown"
+        selection = ("included" if decision.transmit else "excluded")
+        item.update(council_match=match.status, matched_councils=list(match.councils),
+                    match_method=match.method, selection=selection)
+        area_detail = (f"; council match: {match.status}"
+                       + (f" ({', '.join(match.councils)})" if match.councils else "")
+                       + (f" via {match.method}" if match.method else ""))
         budget = getattr(self._tx, "message_budget", MAX_PAYLOAD_BYTES)
         source_note = "; check bom.gov.au"
         body_budget = budget - len(source_note.encode("utf-8"))
@@ -185,14 +245,16 @@ class BomPoller:
         parts = append_source_note(body_parts, source_note, budget)
         logged_text = " || ".join(parts)
 
-        revision_hash = alert.revision_hash()
-        latest = self._db.latest_history(alert.alert_id)
+        coverage = json.dumps([all_councils, sorted(selected), include_unknown],
+                              separators=(",", ":"))
+        coverage_hash = hashlib.sha256(coverage.encode()).hexdigest()[:8]
+        revision_hash = f"{alert.revision_hash()}:{coverage_hash}"
         if latest is None or latest["revision_hash"] != revision_hash:
-            detail = decision.detail
+            detail = decision.detail + area_detail
             history_text = logged_text if decision.transmit else ""
             transmit_status = "queued" if decision.transmit else None
             if decision.transmit and dry_run:
-                detail = f"DRY-RUN: {decision.detail}"
+                detail = f"DRY-RUN: {decision.detail}{area_detail}"
                 transmit_status = "dry-run"
             disposition = decision.disposition
             if latest is not None and disposition == "sent":
@@ -201,6 +263,12 @@ class BomPoller:
                 alert.alert_id, alert.event, alert.area_desc, disposition,
                 history_text, detail, transmit_status=transmit_status,
                 revision_hash=revision_hash,
+                metadata={"region": "NSW", "council_match": match.status,
+                          "matched_councils": list(match.councils),
+                          "match_method": match.method, "selection": selection,
+                          "all_councils": all_councils,
+                          "selected_councils": sorted(selected),
+                          "include_unknown": include_unknown},
             )
         else:
             history_id = latest["id"]

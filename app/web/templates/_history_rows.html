@@ -18,6 +18,11 @@
     </div>
     {% if r.detail %}<div class="rec-detail">{{ r.detail }}</div>{% endif %}
   </div>
+  {% if r.source == 'bom' and r.metadata.region %}
+  <div class="rec-areawrap"><div class="rec-lbl">Council decision</div>
+    <div class="rec-area">{{ r.metadata.region }} · {{ r.metadata.council_match or 'unknown' }}{% if r.metadata.matched_councils %}: {{ r.metadata.matched_councils|join(', ') }}{% endif %}{% if r.metadata.match_method %} ({{ r.metadata.match_method }}){% endif %} · {{ r.metadata.selection or 'not selected' }}</div>
+  </div>
+  {% endif %}
   {% if r.area or r.metadata.status %}
   <div class="rec-areawrap"><div class="rec-lbl">Area and status</div>
     <div class="rec-area">{{ r.area }}{% if r.metadata.status %} · {{ r.metadata.status }}{% endif %}</div>

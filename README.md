@@ -6,11 +6,11 @@
 
 # MeshCore WXEcho
 
-WXEcho polls official Australian Bureau of Meteorology warning RSS feeds, NSW RFS incident data and public Live Traffic NSW GeoJSON feeds, then broadcasts selected notices over a MeshCore radio. It is a small self-hosted web app for a Raspberry Pi, Linux host, Windows machine, or Docker.
+WXEcho polls the NSW Bureau of Meteorology warning RSS feed, NSW RFS incident data and public Live Traffic NSW GeoJSON feeds, then broadcasts selected notices over a MeshCore radio. It is a small self-hosted web app for a Raspberry Pi, Linux host, Windows machine, or Docker.
 
 ## BOM current warnings
 
-BOM, RFS and Live Traffic NSW each have their own enable control and polling interval in minutes (minimum 5). BOM monitoring remains enabled after upgrade unless you turn it off in BOM settings. The **BOM** page shows items in the latest successfully fetched warning feeds for the selected regions, including each region's last successful fetch time. If one region fails during a partial poll, its previous snapshot remains visible with its older timestamp; broadcast History remains separate. The menu has dedicated BOM, NSW RFS and Live Traffic NSW service pages.
+BOM, RFS and Live Traffic NSW each have their own enable control and polling interval in minutes (minimum 5). BOM monitors only the NSW warning feed. The **BOM** page shows the latest NSW feed snapshot, its last successful fetch time, and each warning's council match and selection result; broadcast History remains separate. BOM settings can select all NSW councils or individual councils. When a warning cannot be mapped reliably to councils, it is included by default and marked as unknown in History; this fallback can be disabled in settings.
 
 ## NSW RFS Fires Near Me
 
@@ -28,11 +28,11 @@ State-road coordinates are matched locally against a simplified NSW Spatial Serv
 
 The Settings hub has separate pages for General, BOM, NSW RFS, Live Traffic NSW, MeshCore connection and MeshCore companion controls. Saving one section does not replace settings in another. The History page combines BOM, RFS and Live Traffic NSW records by timestamp and can filter by source, delivery status and date. Source-specific details appear when available. Existing records are copied once into the shared history table on upgrade; the old tables remain untouched as a backup.
 
-Additional services register a stable source ID and label in `app/history.py`, then write through `Database.add_service_history`. Optional source-specific metadata and a registered facet can be shown without adding another history table.
+Additional services register a stable source ID and label in `app/history.py`, then write through `Database.add_service_history`. Optional source-specific metadata and a registered facet can be shown without adding another history table. The dashboard shows the enabled state, poll interval, and last successful poll for BOM, RFS and Live Traffic. Recent Notices contains only successfully transmitted service notices; Dry Run, queued, failed and excluded entries remain in History.
 
 ## Features
 
-- State and territory BOM warning feeds.
+- NSW BOM warning feed with optional NSW council filtering.
 - Optional forecast-district filtering.
 - Configurable Australian IANA timezone display.
 - MeshCore over USB serial or TCP.
@@ -48,7 +48,7 @@ Additional services register a stable source ID and label in `app/history.py`, t
 docker compose up -d
 ```
 
-Open `http://<host>:8110` and configure the BOM regions and MeshCore connection in Settings. The compose file bind-mounts the repository's `data/` directory at `/data` for the SQLite database and mounts `/dev` for USB serial access.
+Open `http://<host>:8110` and configure BOM warning products, council coverage and MeshCore connection in Settings. The compose file bind-mounts the repository's `data/` directory at `/data` for the SQLite database and mounts `/dev` for USB serial access.
 
 ### Data persistence and backup
 
@@ -84,16 +84,16 @@ python -m venv .venv
 
 ## BOM feed behavior
 
-The application uses BOM's public state-based warning RSS feeds, including the warning link and product identifier supplied by BOM. RSS items are normalized into provider-neutral alerts before filtering and deduplication. BOM's feed documentation notes that RSS should not be the sole source of warning information and requires links back to the full BOM warning product.
+The application uses BOM's public NSW warning RSS feed, including the warning link and product identifier supplied by BOM. RSS items are normalized into provider-neutral alerts before filtering and deduplication. BOM's feed documentation notes that RSS should not be the sole source of warning information and requires links back to the full BOM warning product.
 
-Recent warning revisions and the History page record each distinct BOM version received from the selected feeds, including warnings excluded by broadcast filters. An unchanged warning is not added again on every poll. The Events log records each dry-run attempt, so it can grow while History stays the same. The unofficial verification message is queued after warning parts and sent at most once per five minutes on the live channel; its last successful send time survives restarts. Dry-run shows the same five-minute cadence.
+Recent warning revisions and the History page record each distinct BOM version received from the NSW feed, including warnings excluded by broadcast filters. An unchanged warning is not added again on every poll. The Events log records each dry-run attempt, so it can grow while History stays the same. The unofficial verification message is queued after warning parts and sent at most once per five minutes on the live channel; its last successful send time survives restarts. Dry-run shows the same five-minute cadence.
 
-The default broadcast policy includes all BOM warning products. Settings can instead select individual Australian warning products, plus additional products such as Flood Watch, Tropical Cyclone Advice, Road Weather Alert and Bush Walkers Weather Alert. Timestamped RSS titles and `Marine Wind Warning Summary` items are normalized before filtering; qualified flood products and numbered tropical cyclone products match their corresponding product selection. For marine wind warnings whose RSS item contains only a statewide summary, WXEcho resolves the linked BOM product ID and reads the warning detail API. Strong Wind Warning areas and cancellations are sent as separately labelled parts. If detail is unavailable, it falls back to the RSS summary.
+The default broadcast policy includes all BOM warning products. Settings can instead select individual Australian warning products, plus additional products such as Flood Watch, Tropical Cyclone Advice, Road Weather Alert and Bush Walkers Weather Alert. Timestamped RSS titles and `Marine Wind Warning Summary` items are normalized before filtering; qualified flood products and numbered tropical cyclone products match their corresponding product selection. Council matching uses BOM warning polygons when supplied, or a complete list of council names. Broad forecast districts, marine coasts, and incomplete location descriptions are marked unknown rather than treated as outside a selected council. Existing non-NSW current snapshots and rows with proven non-NSW provenance are removed on upgrade; older History without reliable source provenance is retained. For marine wind warnings whose RSS item contains only a statewide summary, WXEcho resolves the linked BOM product ID and reads the warning detail API. Strong Wind Warning areas and cancellations are sent as separately labelled parts. If detail is unavailable, it falls back to the RSS summary.
 
 ## MeshCore setup
 
 1. Open Settings.
-2. Select the BOM state or territory feeds to monitor.
+2. Choose all NSW council areas or individual councils for BOM warnings.
 3. Optionally enter forecast district names.
 4. Configure MeshCore as USB serial or TCP. For USB, choose a path from the always-visible device list; Auto-detect USB refreshes every entry in `/dev/serial/by-id/` without probing it. A serial path can also be entered manually. Live and test channel names load automatically from the chosen companion, and their selected indexes are retained when the radio is offline. Click Save settings to persist the port and channels.
 5. Leave dry-run enabled while checking the dashboard and history.

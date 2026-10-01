@@ -1,6 +1,6 @@
 <section class="panel" style="padding:0;">
-  <div class="panel-head"><h3>Recent alerts</h3><a class="see" href="/history">View history &rarr;</a></div>
-  <div class="meta" style="padding:0 16px 10px;">Latest recorded revision of each alert</div>
+  <div class="panel-head"><h3>Recent Notices</h3><a class="see" href="/history">View history &rarr;</a></div>
+  <div class="meta" style="padding:0 16px 10px;">Successfully transmitted by this device</div>
   {% for a in recent %}
   <div class="arow">
     <div>
@@ -15,7 +15,7 @@
     </div>
   </div>
   {% else %}
-  <div class="arow"><div class="meta">No alerts logged yet.</div></div>
+  <div class="arow"><div class="meta">No notices transmitted yet.</div></div>
   {% endfor %}
 </section>
 
@@ -40,9 +40,9 @@
     <div class="kv"><span class="k">Last TX</span><span class="v">{{ last_tx }}</span></div>
   </section>
   <section class="panel" style="padding:0;">
-    <div class="panel-head"><h3>BOM alerts included</h3><a class="see" href="/settings/bom">Edit &rarr;</a></div>
-    <div class="chips">
-      {% for ev in include %}<span class="chip">{{ ev }}</span>{% endfor %}
-    </div>
+    <div class="panel-head"><h3>Service settings</h3></div>
+    {% for service in services %}
+    <div class="kv"><span class="k">{{ service.label }}</span><span class="v">{{ 'enabled' if service.enabled else 'disabled' }} · <a class="see" href="{{ service.settings_url }}">Edit &rarr;</a></span></div>
+    {% endfor %}
   </section>
 </aside>

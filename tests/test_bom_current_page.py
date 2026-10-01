@@ -21,14 +21,14 @@ def test_successful_region_replaces_only_its_snapshot(tmp_path):
     db.replace_bom_current([warning("NSW", "n1"), warning("VIC", "v1")],
                            {"NSW", "VIC"}, "2026-10-01T00:00:00+00:00")
     db.replace_bom_current([warning("NSW", "n2")], {"NSW"}, "2026-10-01T01:00:00+00:00")
-    assert {row["alert_id"] for row in db.bom_current_items(["NSW", "VIC"])} == {"n2", "v1"}
+    assert {row["alert_id"] for row in db.bom_current_items(["NSW", "VIC"])} == {"n2"}
     assert {row["region"]: row["fetched_at"] for row in db.bom_snapshot_regions(["NSW", "VIC"])} == {
-        "NSW": "2026-10-01T01:00:00+00:00", "VIC": "2026-10-01T00:00:00+00:00"}
+        "NSW": "2026-10-01T01:00:00+00:00"}
     db.replace_bom_current([], {"NSW"}, "2026-10-01T02:00:00+00:00")
-    assert [row["alert_id"] for row in db.bom_current_items(["NSW", "VIC"])] == ["v1"]
+    assert db.bom_current_items(["NSW", "VIC"]) == []
     db.close()
     reopened = Database(str(path))
-    assert reopened.bom_current_items(["VIC"])[0]["alert_id"] == "v1"
+    assert reopened.bom_current_items(["VIC"]) == []
     reopened.close()
 
 
@@ -45,6 +45,7 @@ def test_bom_page_shows_current_snapshot_and_navigation():
     assert page.status_code == 200
     assert "Flood Warning" in page.text
     assert "Hunter" in page.text
+    assert "Council match" in page.text
     assert "partial: VIC failed" in page.text
     assert 'href="/settings/bom"' in page.text
     assert 'href="/traffic"><svg' in page.text
@@ -69,13 +70,12 @@ async def _exercise_partial_poller(monkeypatch):
 
     monkeypatch.setattr("app.poller.BOMClient", PartialClient)
     db = Database(":memory:")
-    db.set_setting("bom_regions", ["NSW", "VIC"])
     db.replace_bom_current([warning("NSW", "n1"), warning("VIC", "v1")],
                            {"NSW", "VIC"}, "2026-10-01T00:00:00+00:00")
     poller = BomPoller(db, object())
     monkeypatch.setattr(poller, "_process", _no_process)
     await poller.poll_once()
-    assert {row["alert_id"] for row in db.bom_current_items(["NSW", "VIC"])} == {"n2", "v1"}
+    assert {row["alert_id"] for row in db.bom_current_items(["NSW", "VIC"])} == {"n2"}
     assert poller.status.last_poll_result.startswith("partial:")
     db.close()
 
