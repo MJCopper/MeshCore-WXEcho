@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.db import Database
-from app.traffic.feed import TrafficItem, council_at, parse_feed
+from app.traffic.feed import TrafficItem, council_at, council_at_prepared, prepare_councils, parse_feed
 from app.traffic.poller import TrafficPoller
 from app.traffic.web import router
 
@@ -67,6 +67,17 @@ def test_parse_status_and_point_in_council():
     assert council_at(151, -33, POLYGONS) == "Central Coast"
     assert not council_at(153, -33, POLYGONS)
     assert not item(start=time.time() + 3600).active()
+
+
+def test_prepared_councils_match_raw_polygons_and_holes():
+    polygons = [{"properties": {"lganame": "Test"}, "geometry": {
+        "type": "Polygon", "coordinates": [
+            [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]],
+            [[4, 4], [6, 4], [6, 6], [4, 6], [4, 4]],
+        ]}}]
+    prepared = prepare_councils(polygons)
+    for point in ((2, 2), (5, 5), (20, 20)):
+        assert council_at_prepared(*point, prepared) == council_at(*point, polygons)
 
 
 @pytest.mark.asyncio

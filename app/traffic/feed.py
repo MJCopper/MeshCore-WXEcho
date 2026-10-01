@@ -1,6 +1,7 @@
 """Public, keyless Live Traffic NSW GeoJSON feeds and normalisation."""
 from __future__ import annotations
 
+import asyncio
 import gzip
 import hashlib
 import html
@@ -136,6 +137,31 @@ def council_at(lon: float, lat: float, polygons: list[dict]) -> str:
     return ""
 
 
+def prepare_councils(polygons: list[dict]) -> list[tuple]:
+    """Index polygon bounds once so most point checks skip the expensive rings."""
+    prepared = []
+    for feature in polygons:
+        geometry = feature.get("geometry") or {}
+        coordinates = geometry.get("coordinates") or []
+        shapes = [coordinates] if geometry.get("type") == "Polygon" else coordinates
+        for rings in shapes:
+            if not rings or not rings[0]:
+                continue
+            xs = [point[0] for point in rings[0]]
+            ys = [point[1] for point in rings[0]]
+            prepared.append((min(xs), min(ys), max(xs), max(ys),
+                             clean(feature.get("properties", {}).get("lganame")), rings))
+    return prepared
+
+def council_at_prepared(lon: float, lat: float, prepared: list[tuple]) -> str:
+    for left, bottom, right, top, name, rings in prepared:
+        if left <= lon <= right and bottom <= lat <= top:
+            if _inside_ring(lon, lat, rings[0]) and not any(
+                    _inside_ring(lon, lat, hole) for hole in rings[1:]):
+                return name
+    return ""
+
+
 class TrafficClient:
     def __init__(self, timeout: float = 30):
         self.timeout = timeout
@@ -160,8 +186,10 @@ class TrafficClient:
     async def boundaries(self) -> list[dict]:
         """Dated NSW Spatial Services snapshot; avoids a boundary API outage at poll time."""
         path = Path(__file__).with_name("nsw_lga.geojson.gz")
-        with gzip.open(path, "rt", encoding="utf-8") as source:
-            features = json.load(source).get("features", [])
-        if len(features) < 100:
-            raise TrafficFeedError("Bundled council boundaries are incomplete")
-        return features
+        def load():
+            with gzip.open(path, "rt", encoding="utf-8") as source:
+                features = json.load(source).get("features", [])
+            if len(features) < 100:
+                raise TrafficFeedError("Bundled council boundaries are incomplete")
+            return features
+        return await asyncio.to_thread(load)

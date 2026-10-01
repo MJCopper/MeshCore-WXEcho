@@ -278,6 +278,9 @@ class Database:
                     "UPDATE settings SET value = ? WHERE key = 'filter_include_exact'",
                     (json.dumps([]),),
                 )
+            # Old traffic code cached a multi-megabyte boundary map in settings.
+            # The bundled map is now loaded once in memory and indexed there.
+            self._conn.execute("DELETE FROM settings WHERE key = 'traffic_boundaries'")
             self._conn.commit()
 
     # ---- settings -------------------------------------------------------

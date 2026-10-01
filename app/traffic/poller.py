@@ -9,7 +9,7 @@ from ..config import FINAL_VERIFICATION_MESSAGE, MAX_PAYLOAD_BYTES, QUEUE_MAX, V
 from ..formatter import _split_complete_message, append_source_note
 from ..rfs.councils import COUNCILS
 from ..rfs.feed import council_key
-from .feed import SOURCE_URL, TYPES, TrafficClient, TrafficFeedError, council_at
+from .feed import SOURCE_URL, TYPES, TrafficClient, TrafficFeedError, council_at_prepared, prepare_councils
 
 logger = logging.getLogger("wx_echo.traffic")
 
@@ -36,7 +36,7 @@ class TrafficPoller:
         self._poke_generation = 0
         self.last_poll = ""
         self.last_result = "not polled"
-        self._polygons = None
+        self._councils = None
 
     def start(self):
         recovered = self.db.traffic_recover_queued()
@@ -86,14 +86,9 @@ class TrafficPoller:
             return
         try:
             items = await self.client.fetch()
-            if self._polygons is None:
-                cached = self.db.get_setting("traffic_boundaries", {})
-                if cached.get("features"):
-                    self._polygons = cached["features"]
-                else:
-                    self._polygons = await self.client.boundaries()
-                    self.db.set_setting("traffic_boundaries", {"features": self._polygons,
-                                                                 "updated": datetime.now(timezone.utc).isoformat()})
+            if self._councils is None:
+                polygons = await self.client.boundaries()
+                self._councils = await asyncio.to_thread(prepare_councils, polygons)
         except (TrafficFeedError, KeyError) as exc:
             self.last_result = f"error: {exc}"
             self.db.add_error("traffic", str(exc))
@@ -107,9 +102,14 @@ class TrafficPoller:
         first_live_poll = not self.db.get_setting("traffic_baseline_done", False) and not dry_run
         budget = getattr(self.tx, "message_budget", MAX_PAYLOAD_BYTES)
         queued = False
-        for item in items:
-            council = (council_at(item.lon, item.lat, self._polygons)
-                       if item.lon is not None and item.lat is not None else "") or item.council
+        def match_councils():
+            return [(council_at_prepared(item.lon, item.lat, self._councils)
+                     if item.lon is not None and item.lat is not None else "") or item.council
+                    for item in items]
+        councils = await asyncio.to_thread(match_councils)
+        for index, (item, council) in enumerate(zip(items, councils)):
+            if index % 20 == 0:
+                await asyncio.sleep(0)
             previous = self.db.traffic_get_item(item.item_id)
             active = item.active()
             self.db.traffic_save_item(item, council, active)
