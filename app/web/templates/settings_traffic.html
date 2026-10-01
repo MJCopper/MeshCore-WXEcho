@@ -6,8 +6,6 @@
 <form method="post" action="/settings/traffic">
   <div class="panel">
     <label class="chk"><input type="checkbox" name="traffic_enabled" value="1" {% if s.traffic_enabled %}checked{% endif %}> Enable Live Traffic NSW monitoring</label>
-    <label>Live Traffic NSW poll interval (minutes, minimum 5)</label>
-    <input name="traffic_poll_minutes" type="number" min="5" value="{{ s.traffic_poll_minutes }}" required>
     <p class="hint">Uses public Transport for NSW GeoJSON feeds, the Live MeshCore channel, and the global Dry Run setting. Existing matching items on the first live poll are recorded without radio transmission.</p>
     <div class="grp-title">Hazard feeds to broadcast</div>
     <div class="checkgrid">
@@ -21,6 +19,11 @@
     <div class="checkgrid" id="traffic-councils" style="max-height:320px;overflow:auto;margin-top:12px;">
       {% for council in councils %}<label class="chk"><input type="checkbox" name="traffic_councils" value="{{ council }}" {% if council in selected_councils %}checked{% endif %}> {{ council }}</label>{% endfor %}
     </div>
+  </div>
+  <div class="panel">
+    <h3>Live Traffic NSW polling</h3>
+    <label>Poll interval (minutes, minimum 5)</label>
+    <input name="traffic_poll_minutes" type="number" min="5" value="{{ s.traffic_poll_minutes }}" required>
   </div>
   <button type="submit">Save traffic settings</button>
 </form>

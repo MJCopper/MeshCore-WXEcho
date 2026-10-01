@@ -7,8 +7,6 @@
   <div class="panel">
     <h3>RFS broadcast settings</h3>
     <label class="chk"><input type="checkbox" name="rfs_enabled" value="1" {% if s.rfs_enabled %}checked{% endif %}> Enable NSW RFS monitoring</label>
-    <label>NSW RFS poll interval (minutes, minimum 5)</label>
-    <input name="rfs_poll_minutes" type="number" min="5" value="{{ s.rfs_poll_minutes }}" required>
     <p class="hint">Uses the same Live MeshCore channel and Dry Run setting as BOM. Council selection applies to every alert level, including Emergency Warning.</p>
     <div class="grp-title">Alert levels to broadcast</div>
     <div class="checkgrid">
@@ -21,6 +19,11 @@
     <div class="checkgrid" id="rfs-councils" style="max-height:320px;overflow:auto;margin-top:12px;">
       {% for council in councils %}<label class="chk"><input type="checkbox" name="rfs_councils" value="{{ council }}" {% if council in selected_councils %}checked{% endif %}> {{ council }}</label>{% endfor %}
     </div>
+  </div>
+  <div class="panel">
+    <h3>RFS polling</h3>
+    <label>Poll interval (minutes, minimum 5)</label>
+    <input name="rfs_poll_minutes" type="number" min="5" value="{{ s.rfs_poll_minutes }}" required>
   </div>
   <button type="submit">Save RFS settings</button>
 </form>
