@@ -11,7 +11,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__
-from ..config import MAX_PAYLOAD_BYTES, POLL_INTERVAL_MIN
+from ..config import MAX_PAYLOAD_BYTES, MIN_POLL_MINUTES, polling_seconds
+from ..bom import BOM_FEEDS
 from ..meshcore_discovery import list_usb_serial_devices
 
 
@@ -27,6 +28,7 @@ router = APIRouter()
 TEMPLATES = Jinja2Templates(directory=str(_template_dir()))
 
 from ..formatter import fmt_local
+from ..history import history_sources, get_history_source, history_source_label
 TEMPLATES.env.filters["localtime"] = fmt_local
 
 
@@ -40,13 +42,22 @@ DISP_LABELS = {
     "update": "update",
     "cancelled": "cancelled",
     "duplicate": "duplicate",
+    "excluded-alert-level": "excluded: alert level",
+    "excluded-council": "excluded: council",
+    "absent-from-feed": "absent from feed",
+    "baseline": "existing item",
+    "deferred-queue": "waiting for send queue",
+    "excluded-hazard-type": "excluded: hazard type",
+    "excluded-rfs-fire-coverage": "excluded: RFS fire coverage",
+    "excluded-ended-or-not-yet-active": "ended or future",
 }
 
 TX_STATUS_LABELS = {
     "queued": "queued",
-    "success": "delivered",
+    "success": "transmitted",
     "failed": "failed",
     "dry-run": "dry-run",
+    "interrupted": "interrupted",
 }
 
 
@@ -123,7 +134,8 @@ def _dash_ctx(request) -> dict:
             return (now - datetime.datetime.fromisoformat(ts)).total_seconds() / 86400.0
         except Exception:
             return 999
-    rows = db.query_history(limit=1000)
+    rows = (db.query_service_history(limit=1000) if hasattr(db, "query_service_history")
+            else db.query_history(limit=1000))
     sent = [r for r in rows if r["transmit_status"] == "success"]
     sent_7d = sum(1 for r in sent if _age(r["ts"]) < 7)
     sent_today = sum(1 for r in sent if _age(r["ts"]) < 1)
@@ -137,18 +149,32 @@ def _dash_ctx(request) -> dict:
     if db.get_setting("filter_include_suffix", []):
         include = ["All Warnings"] + include
     recent_rows = []
-    seen_alert_ids = set()
-    for r in db.query_history(limit=200):
-        alert_id = r["alert_id"] if "alert_id" in r.keys() else None
-        if alert_id and alert_id in seen_alert_ids:
+    seen_items = set()
+    source_counts = {}
+    candidates = (db.query_service_history(limit=2000) if hasattr(db, "query_service_history")
+                  else db.query_history(limit=200))
+    for r in candidates:
+        keys = r.keys()
+        source = r["source"] if "source" in keys else "bom"
+        external_id = r["external_id"] if "external_id" in keys else r.get("alert_id", "")
+        identity = (source, external_id)
+        if source == "traffic" and (str(r["disposition"]).startswith("excluded-") or
+                                    r["disposition"] in ("baseline", "deferred-queue", "absent-from-feed")):
             continue
-        if alert_id:
-            seen_alert_ids.add(alert_id)
+        if source_counts.get(source, 0) >= 2:
+            continue
+        if external_id and identity in seen_items:
+            continue
+        if external_id:
+            seen_items.add(identity)
         recent_rows.append(r)
+        source_counts[source] = source_counts.get(source, 0) + 1
         if len(recent_rows) == 6:
             break
     recent = [{
-        "event": r["event"], "area": r["area"], "disposition": r["disposition"],
+        "source": history_source_label(r["source"] if "source" in r.keys() else "bom"),
+        "event": r["title"] if "title" in r.keys() else r["event"],
+        "area": r["area"], "disposition": r["disposition"],
         "transmit_status": r["transmit_status"], "detail": r["detail"],
         "text": r["transmitted_text"], "when": fmt_local(r["ts"], tz),
     } for r in recent_rows]
@@ -161,8 +187,9 @@ def _dash_ctx(request) -> dict:
 
     # ---- health watchdog: catch SILENT failures (looks live, delivers nothing) --
     st = poller.status
-    interval = int(db.get_setting("poll_interval", 120))
+    interval = polling_seconds(db.get_setting("bom_poll_minutes", 5), 5)
     dry = bool(db.get_setting("dry_run", True))
+    bom_enabled = bool(db.get_setting("bom_enabled", True))
     def _age_s(ts):
         try:
             return (now - datetime.datetime.fromisoformat(ts)).total_seconds()
@@ -172,14 +199,14 @@ def _dash_ctx(request) -> dict:
     # 1. Are we still reaching BOM? A stale success time = we are blind to alerts.
     succ_age = _age_s(st.last_poll_success_time)
     stale_after = max(interval * 3, 360)
-    if succ_age is None:
+    if bom_enabled and succ_age is None:
         problems.append(("warn", "No successful BOM poll yet."))
-    elif succ_age > stale_after:
+    elif bom_enabled and succ_age > stale_after:
         problems.append(("critical",
             "Not reaching BOM: last good poll %d min ago. Not receiving alerts." % (succ_age // 60)))
-    if st.last_poll_result.startswith("error"):
+    if bom_enabled and st.last_poll_result.startswith("error"):
         problems.append(("warn", "Last BOM poll errored: %s" % st.last_poll_result[7:][:80]))
-    elif st.last_poll_result.startswith("partial"):
+    elif bom_enabled and st.last_poll_result.startswith("partial"):
         problems.append(("warn", "Some BOM feeds failed: %s" % st.last_poll_result[9:][:80]))
     # 2. Radios: any enabled radio offline means alerts may not go out.
     radios = tx.status()
@@ -216,9 +243,10 @@ def _dash_ctx(request) -> dict:
         "dry_run": bool(db.get_setting("dry_run", True)),
         "connected": tx.connected, "device": device, "tx_error": tx.last_error,
         "channel_index": int(db.get_setting("meshcore_channel", 0)),
-        "state_count": len(regions), "district_count": len(zones),
+        "bom_enabled": bom_enabled,
+        "state_count": len(regions) if bom_enabled else 0, "district_count": len(zones),
         "all_districts": not zones,
-        "poll_interval": int(db.get_setting("poll_interval", 120)), "queue_depth": tx.queue_depth,
+        "poll_interval": polling_seconds(db.get_setting("bom_poll_minutes", 5), 5) // 60, "queue_depth": tx.queue_depth,
         "last_poll_local": fmt_local(poller.status.last_poll_time, tz) if poller.status.last_poll_time else "-",
         "uptime_str": uptime_str, "sent_7d": sent_7d, "sent_today": sent_today,
         "spark_line": spark_line, "spark_fill": spark_fill,
@@ -261,51 +289,55 @@ async def toggle_dry_run(request: Request):
     return render(request, "_dash_top.html", **_dash_ctx(request))
 
 
-# ---- history -----------------------------------------------------------
+# ---- shared history ----------------------------------------------------
 def _superseded_history_ids(rows):
-    """Flag older versions of the same BOM item in the visible History page."""
-    seen = set()
-    superseded = set()
+    seen, superseded = set(), set()
     for row in rows:
-        if "alert_id" not in row.keys() or "id" not in row.keys():
-            continue
-        alert_id = row["alert_id"]
-        if alert_id in seen:
+        source = row.get("source", "bom")
+        external_id = row.get("external_id", row.get("alert_id", ""))
+        key = (source, external_id)
+        if external_id and key in seen:
             superseded.add(row["id"])
-        else:
-            seen.add(alert_id)
+        elif external_id:
+            seen.add(key)
     return superseded
 
 
+def _history_context(request, source="", disposition="", transmit_status="",
+                     date_from="", date_to="", facet=""):
+    db = _db(request)
+    selected = get_history_source(source)
+    source = source if selected else ""
+    kwargs = dict(source=source or None, disposition=disposition or None,
+                  transmit_status=transmit_status or None,
+                  date_from=date_from or None, date_to=date_to or None)
+    if selected and selected.facet_key and facet:
+        kwargs.update(facet_key=selected.facet_key, facet_value=facet)
+    rows = db.query_service_history(**kwargs)
+    for row in rows:
+        row["source_label"] = history_source_label(row["source"])
+    return dict(rows=rows, superseded_ids=_superseded_history_ids(rows),
+                source=source, sources=history_sources(), selected_source=selected,
+                disposition=disposition, transmit_status=transmit_status,
+                date_from=date_from, date_to=date_to, facet=facet,
+                dispositions=["sent", "filtered", "update", "cancelled"],
+                transmit_statuses=["queued", "success", "failed", "interrupted", "dry-run"])
+
+
 @router.get("/history", response_class=HTMLResponse)
-async def history(request: Request, disposition: str = "", transmit_status: str = "",
-                  date_from: str = "", date_to: str = ""):
-    rows = _db(request).query_history(
-        disposition=disposition or None,
-        transmit_status=transmit_status or None,
-        date_from=date_from or None,
-        date_to=date_to or None,
-    )
-    return render(
-        request, "history.html", rows=rows, superseded_ids=_superseded_history_ids(rows), disposition=disposition,
-        transmit_status=transmit_status, date_from=date_from, date_to=date_to,
-        dispositions=["sent", "filtered", "update", "cancelled"],
-        transmit_statuses=["queued", "success", "failed", "dry-run"],
-    )
+async def history(request: Request, source: str = "", disposition: str = "",
+                  transmit_status: str = "", date_from: str = "", date_to: str = "",
+                  facet: str = ""):
+    return render(request, "history.html", **_history_context(
+        request, source, disposition, transmit_status, date_from, date_to, facet))
 
 
 @router.get("/partials/history", response_class=HTMLResponse)
-async def history_partial(request: Request, disposition: str = "", transmit_status: str = "",
-                          date_from: str = "", date_to: str = ""):
-    # Just the rows, honoring the same filters, for live polling.
-    rows = _db(request).query_history(
-        disposition=disposition or None,
-        transmit_status=transmit_status or None,
-        date_from=date_from or None,
-        date_to=date_to or None,
-    )
-    return render(request, "_history_rows.html", rows=rows,
-                  superseded_ids=_superseded_history_ids(rows))
+async def history_partial(request: Request, source: str = "", disposition: str = "",
+                          transmit_status: str = "", date_from: str = "", date_to: str = "",
+                          facet: str = ""):
+    return render(request, "_history_rows.html", **_history_context(
+        request, source, disposition, transmit_status, date_from, date_to, facet))
 
 
 # ---- transmit log ------------------------------------------------------
@@ -357,12 +389,37 @@ _KNOWN_EVENTS = {event for group in _EVENT_GROUPS.values() for event in group}
 
 # ---- settings ----------------------------------------------------------
 @router.get("/settings", response_class=HTMLResponse)
+async def settings_home(request: Request):
+    return render(request, "settings_home.html")
+
+
+@router.get("/settings/general", response_class=HTMLResponse)
+async def general_settings_page(request: Request):
+    db = _db(request)
+    tz = db.get_setting("display_timezone", "Australia/Sydney")
+    return render(request, "settings_general.html", timezones=_TIMEZONES,
+                  tz_current=tz, dry_run=bool(db.get_setting("dry_run", True)))
+
+
+@router.post("/settings/general")
+async def save_general_settings(request: Request,
+                                display_timezone: str = Form("Australia/Sydney"),
+                                dry_run: str = Form("")):
+    db = _db(request)
+    allowed = {value for value, _ in _TIMEZONES}
+    db.set_setting("display_timezone", display_timezone if display_timezone in allowed else "Australia/Sydney")
+    db.set_setting("dry_run", bool(dry_run))
+    db.add_event("INFO", "general settings saved")
+    return RedirectResponse("/settings/general", status_code=303)
+
+
+@router.get("/settings/legacy", response_class=HTMLResponse)
 async def settings_page(request: Request):
     db = _db(request)
     s = db.all_settings()
     mc_connected = _status_flag(request, "meshcore")
     return render(
-        request, "settings.html", s=s, min_interval=POLL_INTERVAL_MIN, ports=list_usb_serial_devices(),
+        request, "settings.html", s=s, min_interval=MIN_POLL_MINUTES, ports=list_usb_serial_devices(),
         timezones=_TIMEZONES, tz_current=(s.get("display_timezone", "") or ""),
         tz_known={v for v, _ in _TIMEZONES},
         event_groups=_EVENT_GROUPS,
@@ -381,10 +438,82 @@ async def settings_page(request: Request):
     )
 
 
+@router.get("/bom", response_class=HTMLResponse)
+async def bom_page(request: Request):
+    db = _db(request)
+    configured = db.get_setting("bom_regions", ["NSW"]) or list(BOM_FEEDS)
+    regions = [str(region).upper() for region in configured]
+    poll_status = _poller(request).status
+    return render(
+        request, "bom.html", items=db.bom_current_items(regions),
+        snapshots={row["region"]: row["fetched_at"] for row in db.bom_snapshot_regions(regions)},
+        regions=regions, bom_enabled=bool(db.get_setting("bom_enabled", True)),
+        bom_status=poll_status.last_poll_result,
+        bom_last_poll=poll_status.last_poll_time,
+    )
+
+
+@router.get("/settings/bom", response_class=HTMLResponse)
+async def bom_settings_page(request: Request):
+    legacy = await settings_page(request)
+    return render(request, "settings_bom.html", **{k: v for k, v in legacy.context.items()
+                                                   if k not in ("request", "max_bytes", "tz", "disp_label", "tx_label", "version")})
+
+
+@router.post("/settings/bom")
+async def save_bom_settings(request: Request, poll_interval: int = Form(...),
+                            bom_enabled: str = Form(""),
+                            bom_regions: list[str] = Form(default=[]),
+                            bom_districts: str = Form(""), events: list[str] = Form(default=[]),
+                            all_warnings: str = Form(""), warning_choices_submitted: str = Form("")):
+    db = _db(request)
+    db.set_setting("bom_enabled", bool(bom_enabled))
+    db.set_setting("bom_regions", [r.strip().upper() for r in bom_regions if r.strip()])
+    db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
+    minutes = max(MIN_POLL_MINUTES, int(poll_interval))
+    db.set_setting("bom_poll_minutes", minutes)
+    db.set_setting("poll_interval", minutes * 60)
+    selected = [e for e in events if e in _KNOWN_EVENTS]
+    if all_warnings and warning_choices_submitted != "1":
+        old = [e for e in db.get_setting("filter_include_exact", []) if e in _EVENT_GROUPS["Warning products"]]
+        selected = old + [e for e in selected if e not in _EVENT_GROUPS["Warning products"]]
+    db.set_setting("filter_include_exact", list(dict.fromkeys(selected)))
+    db.set_setting("filter_include_suffix", ["Warning"] if all_warnings else [])
+    db.set_setting("filter_exclude_exact", [])
+    _poller(request).poke()
+    db.add_event("INFO", "BOM settings saved")
+    return RedirectResponse("/settings/bom", status_code=303)
+
+
+@router.get("/settings/meshcore", response_class=HTMLResponse)
+async def meshcore_connection_page(request: Request):
+    legacy = await settings_page(request)
+    return render(request, "settings_meshcore_connection.html", **{k: v for k, v in legacy.context.items()
+                  if k not in ("request", "max_bytes", "tz", "disp_label", "tx_label", "version")})
+
+
+@router.post("/settings/meshcore")
+async def save_meshcore_connection(request: Request, meshcore_conn: str = Form("serial"),
+                                   meshcore_port: str = Form(""), meshcore_host: str = Form(""),
+                                   meshcore_channel: int = Form(0),
+                                   meshcore_test_channel: int = Form(1)):
+    db = _db(request)
+    db.set_setting("meshcore_enabled", True)
+    db.set_setting("meshcore_conn", meshcore_conn if meshcore_conn in ("serial", "tcp") else "serial")
+    db.set_setting("meshcore_port", meshcore_port.strip())
+    db.set_setting("meshcore_host", meshcore_host.strip())
+    db.set_setting("meshcore_channel", meshcore_channel)
+    db.set_setting("meshcore_test_channel", meshcore_test_channel)
+    await _tx(request).reconfigure()
+    db.add_event("INFO", "MeshCore connection saved")
+    return RedirectResponse("/settings/meshcore", status_code=303)
+
+
 @router.post("/settings", response_class=HTMLResponse)
 async def save_settings(
     request: Request,
     poll_interval: int = Form(...),
+    bom_enabled: str = Form(""),
     display_timezone: str = Form("Australia/Sydney"),
     bom_regions: list[str] = Form(default=[]),
     bom_districts: str = Form(""),
@@ -403,11 +532,13 @@ async def save_settings(
         except (TypeError, ValueError):
             return 2
     db, tx, poller = _db(request), _tx(request), _poller(request)
-    interval = max(POLL_INTERVAL_MIN, int(poll_interval))
+    interval = max(MIN_POLL_MINUTES, int(poll_interval))
 
+    db.set_setting("bom_enabled", bool(bom_enabled))
     db.set_setting("bom_regions", [r.strip().upper() for r in bom_regions if r.strip()])
     db.set_setting("bom_districts", [d.strip() for d in bom_districts.replace(",", "\n").splitlines() if d.strip()])
-    db.set_setting("poll_interval", interval)
+    db.set_setting("bom_poll_minutes", interval)
+    db.set_setting("poll_interval", interval * 60)
     db.set_setting("display_timezone", display_timezone.strip())
     selected = [e for e in events if e in _KNOWN_EVENTS]
     if all_warnings and warning_choices_submitted != "1":

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %} &middot; Live Traffic NSW settings{% endblock %}
+{% block content %}
+<h2>Live Traffic NSW settings</h2>
+<p class="hint"><a href="/traffic">View current traffic items</a> · <a href="/history?source=traffic">View traffic history</a></p>
+<form method="post" action="/settings/traffic">
+  <div class="panel">
+    <label class="chk"><input type="checkbox" name="traffic_enabled" value="1" {% if s.traffic_enabled %}checked{% endif %}> Enable Live Traffic NSW monitoring</label>
+    <label>Live Traffic NSW poll interval (minutes, minimum 5)</label>
+    <input name="traffic_poll_minutes" type="number" min="5" value="{{ s.traffic_poll_minutes }}" required>
+    <p class="hint">Uses public Transport for NSW GeoJSON feeds, the Live MeshCore channel, and the global Dry Run setting. Existing matching items on the first live poll are recorded without radio transmission.</p>
+    <div class="grp-title">Hazard feeds to broadcast</div>
+    <div class="checkgrid">
+      {% for item in types %}<label class="chk"><input type="checkbox" name="traffic_types" value="{{ item }}" {% if item in selected_types %}checked{% endif %}> {{ item|title }}{% if item == 'regional' %} (local council roads){% endif %}</label>{% endfor %}
+    </div>
+    <p class="hint">Scheduled roadworks, including those in the regional feed, require Roadwork to be selected. Fire-feed notices are suppressed when RFS monitoring is enabled to avoid duplicate fire broadcasts.</p>
+    <div class="grp-title">Council areas</div>
+    <label class="chk"><input type="checkbox" name="traffic_all_councils" value="1" {% if s.traffic_all_councils %}checked{% endif %}> All NSW council areas</label>
+    <p class="hint">State-road locations are matched to council boundaries. Unmatched items are shown in History but are not broadcast.</p>
+    <label>Find a council</label><input type="search" placeholder="Search council areas" oninput="document.querySelectorAll('#traffic-councils label').forEach(e => e.hidden = !e.textContent.toLowerCase().includes(this.value.toLowerCase()))">
+    <div class="checkgrid" id="traffic-councils" style="max-height:320px;overflow:auto;margin-top:12px;">
+      {% for council in councils %}<label class="chk"><input type="checkbox" name="traffic_councils" value="{{ council }}" {% if council in selected_councils %}checked{% endif %}> {{ council }}</label>{% endfor %}
+    </div>
+  </div>
+  <button type="submit">Save traffic settings</button>
+</form>
+{% endblock %}

@@ -155,6 +155,15 @@ def _split_complete_message(message: str, max_bytes: int) -> list[str]:
     return [_with_part_marker(i, total, chunk) for i, chunk in enumerate(chunks, 1)]
 
 
+def append_source_note(parts: list[str], note: str, max_bytes: int) -> list[str]:
+    """Keep a source note whole, moving it to a new part when necessary."""
+    if not parts or _byte_len(note) > max_bytes:
+        raise ValueError("MeshCore message budget too small for source note")
+    if _byte_len(parts[-1] + note) <= max_bytes:
+        return [*parts[:-1], parts[-1] + note]
+    return [*parts, note.lstrip("; ")]
+
+
 def build_mesh_text(alert, tz_name: str = "Australia/Sydney",
                     max_bytes: int = MAX_PAYLOAD_BYTES) -> str:
     """Payload for a non-cancel alert, enriched when BOM page data is available."""

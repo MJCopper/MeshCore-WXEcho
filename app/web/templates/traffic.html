@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %} &middot; Live Traffic NSW{% endblock %}
+{% block content %}
+<h2>Live Traffic NSW</h2>
+<div class="panel">
+  <p class="hint">Source: <a href="https://www.livetraffic.com/">Transport for NSW Live Traffic</a>. Data © Transport for NSW, from the <a href="https://data.nsw.gov.au/data/dataset/2-live-traffic-hazards">Live Traffic Hazards dataset</a>. This unofficial relay may be delayed or incomplete. Check the source for current road information.</p>
+  <p><b>Feed:</b> {{ feed_status }}{% if last_poll %} · Last checked {{ last_poll|localtime(tz) }}{% endif %}</p>
+</div>
+<p><a href="/settings/traffic">Traffic settings</a> · <a href="/history?source=traffic">Traffic history</a></p>
+<div class="panel" style="margin-top:18px;">
+  <h3>Recently observed items</h3>
+  {% if incidents %}
+  <table><thead><tr><th>Type</th><th>Item</th><th>Council</th><th>State</th></tr></thead><tbody>
+  {% for i in incidents %}<tr><td>{{ i.feed }} · {{ i.category }}</td><td>{{ i.title }}<br><span class="hint">{{ i.road }}{% if i.suburb %}, {{ i.suburb }}{% endif %}</span></td><td>{{ i.council or 'Unmatched' }}</td><td>{{ 'Active' if i.active else 'Ended or future' }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<p class="hint">No traffic items loaded. The feeds are checked when monitoring is enabled.</p>{% endif %}
+</div>
+{% endblock %}

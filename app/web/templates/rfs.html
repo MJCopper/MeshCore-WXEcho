@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %} &middot; NSW RFS{% endblock %}
+{% block content %}
+<h2>NSW RFS Fires Near Me</h2>
+<div class="panel">
+  <p class="hint">Source: <a href="https://www.rfs.nsw.gov.au/fire-information/fires-near-me">NSW Rural Fire Service Fires Near Me</a>.
+  © State of New South Wales (NSW Rural Fire Service). For current information go to <a href="https://www.rfs.nsw.gov.au/">www.rfs.nsw.gov.au</a>.
+  This unofficial relay may be delayed or incomplete. Incident locations may be approximate.</p>
+  <p><b>Feed:</b> {{ rfs_status }}{% if rfs_last_poll %} · Last checked {{ rfs_last_poll|localtime(tz) }}{% endif %}</p>
+</div>
+<p><a href="/settings/rfs">RFS settings</a> · <a href="/history?source=rfs">RFS history</a></p>
+<div class="panel" style="margin-top:18px;">
+  <h3>Current RFS incidents</h3>
+  {% if incidents %}
+  <table><thead><tr><th>Alert level</th><th>Incident</th><th>Council</th><th>Status</th></tr></thead><tbody>
+  {% for i in incidents %}<tr><td>{{ i.level }}</td><td>{{ i.name }}<br><span class="hint">{{ i.kind }} · {{ i.location }}</span></td><td>{{ i.council or 'Unknown' }}</td><td>{{ i.status }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<p class="hint">No current incidents have been loaded. The RFS feed is checked when monitoring is enabled.</p>{% endif %}
+</div>
+{% endblock %}

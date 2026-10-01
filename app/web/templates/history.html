@@ -1,39 +1,38 @@
 {% extends "base.html" %}
-{% block title %} &middot; BOM History{% endblock %}
+{% block title %} &middot; History{% endblock %}
 {% block content %}
-<h2>Received BOM Warnings</h2>
-<p class="hint">One entry is saved for each received warning revision. Unchanged polls do not add entries. Delivery status shows whether MeshCore sent the prepared message.</p>
+<h2>History</h2>
+<p class="hint">Received revisions, selection decisions, dry-run previews, and local transmission outcomes across services. Unchanged polls do not add entries.</p>
 <div class="panel">
-  <form method="get" action="/history" class="row">
-    <div>
-      <label>Status</label>
-      <select name="disposition">
-        <option value="">all</option>
-        {% for d in dispositions %}
-        <option value="{{ d }}" {% if d == disposition %}selected{% endif %}>{{ disp_label.get(d, d) }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div>
-      <label>MeshCore delivery</label>
-      <select name="transmit_status">
-        <option value="">all</option>
-        {% for status in transmit_statuses %}
-        <option value="{{ status }}" {% if status == transmit_status %}selected{% endif %}>{{ tx_label.get(status, status) }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div><label>From</label>
-      <input type="date" name="date_from" value="{{ date_from }}"></div>
-    <div><label>To</label>
-      <input type="date" name="date_to" value="{{ date_to }}"></div>
-    <div style="display:flex;align-items:flex-end;">
-      <button type="submit">Filter</button></div>
+  <form method="get" action="/history" class="row" id="history-filter">
+    <div><label>Source</label><select name="source" onchange="this.form.submit()">
+      <option value="">All services</option>
+      {% for item in sources %}<option value="{{ item.source_id }}" {% if source == item.source_id %}selected{% endif %}>{{ item.label }}</option>{% endfor %}
+    </select></div>
+    <div><label>MeshCore send</label><select name="transmit_status">
+      <option value="">All</option>
+      {% for status in transmit_statuses %}<option value="{{ status }}" {% if status == transmit_status %}selected{% endif %}>{{ tx_label.get(status, status) }}</option>{% endfor %}
+    </select></div>
+    {% if source == 'bom' %}
+    <div><label>BOM decision</label><select name="disposition">
+      <option value="">All</option>
+      {% for d in dispositions %}<option value="{{ d }}" {% if d == disposition %}selected{% endif %}>{{ disp_label.get(d, d) }}</option>{% endfor %}
+    </select></div>
+    {% endif %}
+    {% if selected_source and selected_source.facet_key %}
+    <div><label>{{ selected_source.facet_label }}</label><select name="facet">
+      <option value="">All</option>
+      {% for choice in selected_source.facet_options %}<option value="{{ choice }}" {% if facet == choice %}selected{% endif %}>{{ choice }}</option>{% endfor %}
+    </select></div>
+    {% endif %}
+    <div><label>From</label><input type="date" name="date_from" value="{{ date_from }}"></div>
+    <div><label>To</label><input type="date" name="date_to" value="{{ date_to }}"></div>
+    <div style="display:flex;align-items:flex-end;"><button type="submit">Filter</button></div>
   </form>
 </div>
 <div class="panel" style="padding:0;" id="history-rows"
      hx-get="/partials/history" hx-trigger="every 15s" hx-swap="innerHTML"
-    hx-include="[name='disposition'],[name='transmit_status'],[name='date_from'],[name='date_to']">
+     hx-include="#history-filter select,#history-filter input">
   {% include "_history_rows.html" %}
 </div>
 {% endblock %}

@@ -11,6 +11,10 @@ from .config import load_bootstrap
 from .db import Database
 from .logging_setup import setup_logging
 from .poller import BomPoller
+from .rfs.poller import RFSPoller
+from .rfs.web import router as rfs_router
+from .traffic.poller import TrafficPoller
+from .traffic.web import router as traffic_router
 from .transmit import TransmitManager
 from .watchdog import Liveness
 from .web.routes import router
@@ -38,11 +42,15 @@ async def lifespan(app: FastAPI):
     db = Database(cfg.db_path)
     tx = TransmitManager(db)
     poller = BomPoller(db, tx)
+    rfs_poller = RFSPoller(db, tx)
+    traffic_poller = TrafficPoller(db, tx)
 
     app.state.cfg = cfg
     app.state.db = db
     app.state.tx = tx
     app.state.poller = poller
+    app.state.rfs_poller = rfs_poller
+    app.state.traffic_poller = traffic_poller
 
     # Liveness watchdog: force a restart if the event loop ever wedges.
     liveness = Liveness(stall_seconds=90.0)
@@ -54,6 +62,8 @@ async def lifespan(app: FastAPI):
     startup_task = asyncio.create_task(_startup_radio(tx))
     app.state.startup_task = startup_task
     poller.start()
+    rfs_poller.start()
+    traffic_poller.start()
 
     try:
         yield
@@ -63,6 +73,8 @@ async def lifespan(app: FastAPI):
         beat_task.cancel()
         if not startup_task.done():
             startup_task.cancel()
+        await traffic_poller.stop()
+        await rfs_poller.stop()
         await poller.stop()
         await tx.stop()
         db.close()
@@ -71,6 +83,8 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="wx-echo", lifespan=lifespan)
     app.include_router(router)
+    app.include_router(rfs_router)
+    app.include_router(traffic_router)
     return app
 
 

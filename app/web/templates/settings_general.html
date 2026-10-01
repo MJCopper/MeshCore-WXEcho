@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %} &middot; General settings{% endblock %}
+{% block content %}
+<h2>General settings</h2>
+<form method="post" action="/settings/general">
+  <div class="panel">
+    <label>Display timezone</label><select name="display_timezone">
+      {% for val, lbl in timezones %}<option value="{{ val }}" {% if val == tz_current %}selected{% endif %}>{{ lbl }}</option>{% endfor %}
+    </select>
+    <label class="chk"><input type="checkbox" name="dry_run" value="1" {% if dry_run %}checked{% endif %}> Dry Run: preview messages without transmitting</label>
+    <p class="hint">Dry Run applies to BOM and NSW RFS. Manual sends and tests can still transmit.</p>
+  </div>
+  <button type="submit">Save general settings</button>
+</form>
+{% endblock %}

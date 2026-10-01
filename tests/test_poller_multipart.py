@@ -121,7 +121,7 @@ async def test_poller_queues_parts_then_final_verification_with_expected_delays(
 
     await poller._process(_warning_item(), rules, "Australia/Sydney", 0, dry_run=False)
 
-    assert [m["text"] for m in tx.enqueued] == ["1/2 first", "2/2 second"]
+    assert [m["text"] for m in tx.enqueued] == ["1/2 first", "2/2 second; check bom.gov.au"]
     assert tx.enqueued[0]["delay_after"] == MULTIPART_GAP_SECONDS
     assert tx.enqueued[1]["delay_after"] == BURST_GAP_SECONDS
     assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) <= 195
@@ -149,6 +149,7 @@ async def test_poller_cancellation_also_queues_final_verification(monkeypatch):
 
     assert len(tx.enqueued) == 1
     assert tx.enqueued[0]["text"].startswith("CANCELLED:")
+    assert tx.enqueued[0]["text"].endswith("; check bom.gov.au")
     assert tx.enqueued[0]["delay_after"] == BURST_GAP_SECONDS
 
 
@@ -214,10 +215,10 @@ async def test_poller_dry_run_logs_history_and_events_with_final_verification(mo
     assert tx.enqueued == []
     assert len(db.events) == 2
     assert db.events[0][1] == "[DRY-RUN] would send: 1/2 first"
-    assert db.events[1][1] == "[DRY-RUN] would send: 2/2 second"
+    assert db.events[1][1] == "[DRY-RUN] would send: 2/2 second; check bom.gov.au"
     assert len(db.history_rows) == 1
     assert db.history_rows[0]["transmitted_text"] == (
-        "1/2 first || 2/2 second"
+        "1/2 first || 2/2 second; check bom.gov.au"
     )
     assert db.history_rows[0]["detail"].startswith("DRY-RUN:")
     assert db.history_rows[0]["transmit_status"] == "dry-run"
@@ -401,3 +402,19 @@ async def test_verification_failure_does_not_change_successful_warning_history(m
     assert db.history_rows[0]["transmit_status"] == "success"
     assert len(db.state_rows) == 1
     assert "verification message failed" in db.errors[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_bom_source_note_fits_multipart_radio_budget():
+    db = _FakeDb()
+    tx = _FakeTx()
+    tx.message_budget = 80
+    poller = BomPoller(db, tx)
+    rules = FilterRules(include_exact=[], include_suffix=["Warning"], exclude_exact=[])
+    item = _warning_item("source-budget")
+    item["area_desc"] = "Hunter, Sydney, Illawarra, South Coast and Central Tablelands"
+    await poller._process(item, rules, "Australia/Sydney", 0, dry_run=False)
+    parts = [entry["text"] for entry in tx.enqueued]
+    assert len(parts) >= 2
+    assert parts[-1].endswith("; check bom.gov.au")
+    assert all(len(part.encode("utf-8")) <= tx.message_budget for part in parts)

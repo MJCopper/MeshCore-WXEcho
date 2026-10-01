@@ -128,9 +128,21 @@ BOM_USER_AGENT = (
 )
 
 DEFAULT_SETTINGS: dict = {
+    "bom_enabled": True,
     "bom_regions": ["NSW"],
     "bom_districts": [],
-    "poll_interval": 120,
+    "rfs_enabled": False,
+    "rfs_all_councils": False,
+    "rfs_councils": [],
+    "rfs_levels": ["Emergency Warning", "Watch and Act"],
+    "traffic_enabled": False,
+    "traffic_all_councils": False,
+    "traffic_councils": [],
+    "traffic_types": ["incident", "flood", "regional"],
+    "poll_interval": 300,  # legacy seconds; BOM now uses bom_poll_minutes
+    "bom_poll_minutes": 5,
+    "rfs_poll_minutes": 10,
+    "traffic_poll_minutes": 10,
     "meshcore_enabled": True,
     "meshcore_conn": "serial",
     "meshcore_port": "",
@@ -148,7 +160,8 @@ DEFAULT_SETTINGS: dict = {
     "filter_exclude_exact": [],
 }
 
-POLL_INTERVAL_MIN = 60
+MIN_POLL_MINUTES = 5
+POLL_INTERVAL_MIN = MIN_POLL_MINUTES * 60
 # Hard ceiling on a single poll cycle. The BOM fetch is already bounded (30s
 # timeout x a few retries), so exceeding this means something hung (DB lock,
 # wedged await, a bug). The watchdog aborts the poll so the loop always recovers.
@@ -170,3 +183,12 @@ MULTIPART_GAP_SECONDS = 3
 REPEAT_GAP_SECONDS = 5   # gap between repeated copies of the same alert
 QUEUE_MAX = 20
 STATE_EXPIRY_HOURS = 48
+
+
+def polling_seconds(value: object, default_minutes: int) -> int:
+    """Convert a persisted service interval to seconds with the common floor."""
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        minutes = default_minutes
+    return max(MIN_POLL_MINUTES, minutes) * 60

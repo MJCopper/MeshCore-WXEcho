@@ -71,7 +71,7 @@ def test_settings_page_renders_persistent_dropdowns_and_auto_refresh():
         }
     )
 
-    resp = client.get("/settings")
+    resp = client.get("/settings/meshcore")
     assert resp.status_code == 200
     body = resp.text
     assert 'id="meshcore_detected_port"' in body
@@ -96,7 +96,7 @@ def test_settings_page_uses_australian_bom_products():
         }
     )
 
-    response = client.get("/settings")
+    response = client.get("/settings/bom")
 
     assert response.status_code == 200
     assert "Severe Weather Warning" in response.text
@@ -189,7 +189,7 @@ def test_settings_page_renders_selects_when_channels_exist():
         connected=True,
     )
 
-    resp = client.get("/settings")
+    resp = client.get("/settings/meshcore")
     assert resp.status_code == 200
     body = resp.text
     assert 'name="meshcore_channel"' in body
@@ -296,7 +296,7 @@ def test_cached_channel_names_are_tied_to_connection_target():
         "meshcore_channels_target": {"conn": "serial", "target": "/dev/ttyACM0"},
     })
 
-    response = client.get("/settings")
+    response = client.get("/settings/meshcore")
 
     assert "Old radio" not in response.text
     assert "selected>3 - current (names unavailable)" in response.text
@@ -324,7 +324,7 @@ def test_all_warnings_disables_only_warning_product_choices():
         "filter_include_exact": ["Marine Wind Warning", "Flood Watch"],
         "filter_include_suffix": ["Warning"],
     })
-    body = client.get("/settings").text
+    body = client.get("/settings/bom").text
     assert 'id="warning-products" class="warning-products is-disabled" aria-disabled="true"' in body
     assert re.search(r'value="Marine Wind Warning" checked disabled', body)
     assert re.search(r'value="Flood Watch" checked>', body)
@@ -362,3 +362,65 @@ def test_javascript_submission_preserves_new_warning_choices_while_all_selected(
     }, follow_redirects=False)
     assert response.status_code == 303
     assert db.get_setting("filter_include_exact") == ["Flood Warning", "Flood Watch"]
+
+
+def test_settings_hub_links_to_independent_sections():
+    client, _, _ = _client({})
+    body = client.get("/settings").text
+    assert 'href="/settings/general"' in body
+    assert 'href="/settings/bom"' in body
+    assert 'href="/settings/rfs"' in body
+    assert 'href="/settings/meshcore"' in body
+    assert 'href="/meshcore/settings"' in body
+
+
+def test_bom_and_meshcore_settings_save_independently():
+    client, db, tx = _client({
+        "meshcore_channel": 2, "meshcore_test_channel": 3,
+        "bom_regions": ["NSW"], "poll_interval": 120,
+    })
+    response = client.post("/settings/bom", data={
+        "poll_interval": "3", "bom_regions": "VIC", "events": "Flood Watch",
+    }, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("bom_regions") == ["VIC"]
+    assert db.get_setting("bom_poll_minutes") == 5
+    assert db.get_setting("poll_interval") == 300
+    assert db.get_setting("meshcore_channel") == 2
+    assert ("reconfigure",) not in tx.calls
+    response = client.post("/settings/meshcore", data={
+        "meshcore_conn": "serial", "meshcore_port": "/dev/ttyACM0",
+        "meshcore_channel": "4", "meshcore_test_channel": "5",
+    }, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("meshcore_channel") == 4
+    assert db.get_setting("bom_regions") == ["VIC"]
+    assert ("reconfigure",) in tx.calls
+
+
+def test_general_settings_save_timezone_and_dry_run():
+    client, db, _ = _client({"dry_run": True, "display_timezone": "Australia/Sydney"})
+    assert 'name="dry_run"' in client.get("/settings/general").text
+    response = client.post("/settings/general", data={
+        "display_timezone": "Australia/Perth",
+    }, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("dry_run") is False
+    assert db.get_setting("display_timezone") == "Australia/Perth"
+
+
+def test_bom_monitoring_checkbox_saves_and_defaults_on():
+    client, db, _ = _client({"bom_enabled": True})
+    assert db.get_setting("bom_enabled") is True
+    page = client.get("/settings/bom")
+    assert 'name="bom_enabled"' in page.text
+    response = client.post("/settings/bom", data={
+        "poll_interval": "5", "bom_regions": "NSW",
+    }, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("bom_enabled") is False
+    response = client.post("/settings/bom", data={
+        "poll_interval": "5", "bom_regions": "NSW", "bom_enabled": "1",
+    }, follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("bom_enabled") is True

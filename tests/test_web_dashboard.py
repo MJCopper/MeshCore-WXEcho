@@ -48,6 +48,10 @@ class DashboardDB:
     def query_history(self, limit=200, **kwargs):
         return self.history[:limit]
 
+    def query_service_history(self, limit=200, **kwargs):
+        return [dict(row, id=i, source="bom", external_id=str(i), title=row["event"],
+                     metadata={}) for i, row in enumerate(self.history[:limit], 1)]
+
     def query_transmit_log(self, limit=200):
         return []
 
@@ -128,7 +132,19 @@ def test_dashboard_and_history_render_populated_data():
     assert "Watching 1 state/territory feed" in dashboard.text
     assert "all forecast districts" in dashboard.text
     assert "/dev/serial/by-id/usb-Seeed_XIAO-if00" in dashboard.text
-    assert "delivered" in dashboard.text
+    assert "transmitted" in dashboard.text
     assert history.status_code == 200
     assert "Severe Weather Warning" in history.text
-    assert "delivered" in history.text
+    assert "transmitted" in history.text
+
+
+def test_disabled_bom_does_not_raise_missing_feed_health_warning():
+    db = DashboardDB()
+    db.settings["bom_enabled"] = False
+    request = SimpleNamespace(app=SimpleNamespace(
+        state=SimpleNamespace(db=db, tx=DashboardTx(), poller=DashboardPoller())
+    ))
+    context = _dash_ctx(request)
+    assert context["bom_enabled"] is False
+    assert context["state_count"] == 0
+    assert not any("BOM poll" in problem for problem in context["health_problems"])

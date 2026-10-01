@@ -1,37 +1,9 @@
 {% extends "base.html" %}
 {% block title %} &middot; Settings{% endblock %}
 {% block content %}
-<h2>Settings</h2>
-<form method="post" action="/settings">
-  <div class="panel">
-    <h3>BOM coverage</h3>
-    <label class="chk"><input type="checkbox" name="bom_enabled" value="1" {% if s.bom_enabled %}checked{% endif %}> Enable BOM monitoring</label>
-    <p class="hint">Select the Australian state or territory warning feeds to monitor. District names are optional filters applied to those feeds.</p>
-    <div class="checkgrid">
-      {% for code, label in [('NSW', 'New South Wales'), ('ACT', 'Australian Capital Territory'), ('VIC', 'Victoria'), ('QLD', 'Queensland'), ('WA', 'Western Australia'), ('SA', 'South Australia'), ('TAS', 'Tasmania'), ('NT', 'Northern Territory')] %}
-      <label class="chk"><input type="checkbox" name="bom_regions" value="{{ code }}" {% if code in (s.bom_regions or []) %}checked{% endif %}> {{ label }}</label>
-      {% endfor %}
-    </div>
-    <label style="margin-top:12px;">Forecast districts (optional, one per line or comma-separated)</label>
-    <textarea name="bom_districts" rows="4" placeholder="e.g. Illawarra&#10;Hunter&#10;Central Coast">{{ (s.bom_districts or [])|join('\n') }}</textarea>
-  </div>
-
-  <div class="panel">
-    <h3>What to broadcast</h3>
-    <label class="chk"><input type="checkbox" name="all_warnings" {% if all_warnings %}checked{% endif %}> <b>All BOM warning products</b></label>
-    <p class="hint">Select individual warning products only when the all-warnings option is off. Watches, advice and alerts are always selected separately.</p>
-    {% for group, group_events in event_groups.items() %}
-      {% set warning_group = group == 'Warning products' %}
-      <div {% if warning_group %}id="warning-products" class="warning-products{% if all_warnings %} is-disabled{% endif %}" aria-disabled="{{ 'true' if all_warnings else 'false' }}"{% endif %}>
-        <div class="grp-title">{{ group }}</div>
-        {% if warning_group %}<p class="hint warning-products-note">Included automatically by All BOM warning products. Your individual choices are saved for later.</p>{% endif %}
-        <div class="checkgrid">
-          {% for ev in group_events %}<label class="chk"><input type="checkbox" name="events" value="{{ ev }}" {% if ev in selected_events %}checked{% endif %}{% if warning_group and all_warnings %} disabled{% endif %}> {{ ev }}</label>{% endfor %}
-        </div>
-      </div>
-    {% endfor %}
-  </div>
-
+<h2>MeshCore connection</h2>
+<p class="hint">Configure the companion connection and Live/Test channels. <a href="/meshcore/settings">Edit companion settings and channels</a>.</p>
+<form method="post" action="/settings/meshcore">
   <div class="panel">
     <h3>MeshCore radio</h3>
     <div class="row" style="margin-top:12px;">
@@ -55,45 +27,8 @@
     </div>
   </div>
 
-  <div class="panel">
-    <h3>BOM service</h3>
-    <div class="row">
-      <div><label>Poll interval (minutes, minimum {{ min_interval }})</label><input name="poll_interval" type="number" min="{{ min_interval }}" value="{{ s.bom_poll_minutes }}" required></div>
-      <div><label>Display timezone</label><select name="display_timezone">{% for val, lbl in timezones %}<option value="{{ val }}" {% if val == tz_current %}selected{% endif %}>{{ lbl }}</option>{% endfor %}</select></div>
-    </div>
-  </div>
-
-  <button type="submit">Save settings</button>
+  <button type="submit">Save MeshCore connection</button>
 </form>
-
-<script>
-(function () {
-  const allWarnings = document.querySelector('[name="all_warnings"]');
-  const warningGroup = document.getElementById('warning-products');
-  const boxes = warningGroup.querySelectorAll('[name="events"]');
-  const form = allWarnings.closest('form');
-
-  function updateWarningChoices() {
-    const disabled = allWarnings.checked;
-    warningGroup.classList.toggle('is-disabled', disabled);
-    warningGroup.setAttribute('aria-disabled', String(disabled));
-    boxes.forEach(box => { box.disabled = disabled; });
-  }
-
-  allWarnings.addEventListener('change', updateWarningChoices);
-  form.addEventListener('submit', () => {
-    if (!allWarnings.checked) return;
-    boxes.forEach(box => { if (box.checked) box.disabled = false; });
-    const marker = document.createElement('input');
-    marker.type = 'hidden';
-    marker.name = 'warning_choices_submitted';
-    marker.value = '1';
-    form.appendChild(marker);
-  });
-  updateWarningChoices();
-})();
-</script>
-
 <script>
 (function () {
   const panel = document.getElementById('meshcore-channel-fields');

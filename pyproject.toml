@@ -14,4 +14,7 @@ asyncio_mode = "auto"
 addopts = "-q"
 
 [tool.setuptools]
-packages = ["app", "app.web"]
+packages = ["app", "app.web", "app.rfs", "app.traffic"]
+
+[tool.setuptools.package-data]
+"app.traffic" = ["*.geojson.gz"]

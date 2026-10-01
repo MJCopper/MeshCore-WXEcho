@@ -98,6 +98,7 @@ class BOMClient:
         self.timeout = timeout
         self.last_server_date: str | None = None
         self.last_errors: list[str] = []
+        self.last_successful_regions: set[str] = set()
 
     async def fetch_active(self, regions: list[str] | str,
                            districts: list[str] | None = None) -> tuple[list[dict], str]:
@@ -116,6 +117,7 @@ class BOMClient:
         alerts: list[dict] = []
         raw_parts: list[str] = []
         self.last_errors = []
+        self.last_successful_regions = set()
         async with httpx.AsyncClient(timeout=self.timeout, headers=headers) as client:
             async def fetch_state(state: str):
                 url = urljoin(BOM_BASE_URL, BOM_FEEDS[state])
@@ -138,6 +140,9 @@ class BOMClient:
                     self.last_errors.append("%s: %s" % (state, exc))
                     continue
                 raw_parts.append(raw)
+                self.last_successful_regions.add(state)
+                for alert in parsed:
+                    alert["region"] = state
                 alerts.extend(parsed)
                 self.last_server_date = response.headers.get("date") or self.last_server_date
         if not raw_parts:

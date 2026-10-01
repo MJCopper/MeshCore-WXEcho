@@ -12,13 +12,13 @@ from .config import (
     FINAL_VERIFICATION_MESSAGE,
     MAX_PAYLOAD_BYTES,
     MULTIPART_GAP_SECONDS,
-    POLL_INTERVAL_MIN,
+    polling_seconds,
     POLL_HARD_TIMEOUT,
     VERIFICATION_INTERVAL_SECONDS,
 )
 from .dedupe import decide
 from .filters import FilterRules, should_include
-from .formatter import build_mesh_parts, _split_complete_message
+from .formatter import build_mesh_parts, _split_complete_message, append_source_note
 from .models import Alert
 
 logger = logging.getLogger("wx_echo.poller")
@@ -47,6 +47,7 @@ class BomPoller:
         self.status = PollerStatus()
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
+        self._wake_generation = 0
         self._stopped = False
         self._enricher = BOMWarningEnricher()
 
@@ -65,10 +66,12 @@ class BomPoller:
                 pass
 
     def poke(self) -> None:
+        self._wake_generation += 1
         self._wake.set()
 
     async def _run(self) -> None:
         while not self._stopped:
+            generation = self._wake_generation
             try:
                 await asyncio.wait_for(self.poll_once(), timeout=POLL_HARD_TIMEOUT)
             except asyncio.TimeoutError:
@@ -79,7 +82,9 @@ class BomPoller:
                 self.status.last_poll_result = f"error: {exc}"
                 self._db.add_error("poller", str(exc))
                 logger.exception("unexpected poll error")
-            interval = max(POLL_INTERVAL_MIN, int(self._db.get_setting("poll_interval", 120)))
+            if self._wake_generation != generation:
+                continue
+            interval = polling_seconds(self._db.get_setting("bom_poll_minutes", 5), 5)
             self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=interval)
@@ -90,6 +95,9 @@ class BomPoller:
 
     async def poll_once(self) -> None:
         settings = self._db.all_settings()
+        if not settings.get("bom_enabled", True):
+            self.status.last_poll_result = "disabled"
+            return
         regions = settings.get("bom_regions", ["NSW"])
         client = BOMClient()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -103,6 +111,9 @@ class BomPoller:
             self._db.add_event("ERROR", f"BOM poll failed: {exc}")
             return
 
+        if not self._db.get_setting("bom_enabled", True):
+            self.status.last_poll_result = "disabled"
+            return
         self.status.last_poll_time = now
         self.status.last_poll_success_time = now
         self.status.last_raw_response = raw
@@ -122,6 +133,14 @@ class BomPoller:
         else:
             self.status.last_poll_result = f"ok: {len(items)} active BOM warning(s)"
 
+        successful = getattr(client, "last_successful_regions", None)
+        if successful is None and not client.last_errors:
+            from .bom import BOM_FEEDS
+            successful = set(regions or BOM_FEEDS)
+            for item in items:
+                item.setdefault("region", next(iter(successful), ""))
+        self._db.replace_bom_current(items, set(successful or ()), now)
+
         self._db.purge_expired_state()
         self._db.prune_history()
 
@@ -132,12 +151,14 @@ class BomPoller:
 
         queued_warning = False
         for item in items:
+            if not self._db.get_setting("bom_enabled", True):
+                break
             try:
                 queued_warning |= bool(await self._process(item, rules, tz_name, channel, dry_run))
             except Exception as exc:
                 logger.exception("error processing BOM warning")
                 self._db.add_error("poller", f"process error: {exc}")
-        if queued_warning:
+        if queued_warning and self._db.get_setting("bom_enabled", True):
             self._queue_verification(channel, dry_run)
 
     async def _process(self, item, rules, tz_name, channel, dry_run) -> None:
@@ -150,11 +171,18 @@ class BomPoller:
             alert.warning_summary = enrichment.summary
             alert.warning_sections = (getattr(enrichment, "sections", ())
                                       if alert.event == "Marine Wind Warning" else ())
+        if not self._db.get_setting("bom_enabled", True):
+            return False
         decision = decide(alert, rules, self._db.get_state)
         budget = getattr(self._tx, "message_budget", MAX_PAYLOAD_BYTES)
-        parts = (_split_complete_message(_format_cancel(alert, tz_name), budget)
-                 if decision.disposition == "cancelled"
-                 else build_mesh_parts(alert, tz_name, max_bytes=budget))
+        source_note = "; check bom.gov.au"
+        body_budget = budget - len(source_note.encode("utf-8"))
+        if body_budget <= 12:
+            raise ValueError("MeshCore message budget too small for BOM source note")
+        body_parts = (_split_complete_message(_format_cancel(alert, tz_name), body_budget)
+                      if decision.disposition == "cancelled"
+                      else build_mesh_parts(alert, tz_name, max_bytes=body_budget))
+        parts = append_source_note(body_parts, source_note, budget)
         logged_text = " || ".join(parts)
 
         revision_hash = alert.revision_hash()

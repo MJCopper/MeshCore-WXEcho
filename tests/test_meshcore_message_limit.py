@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import MAX_PAYLOAD_BYTES
-from app.formatter import _split_complete_message
+from app.formatter import _split_complete_message, append_source_note
 from app.transmit import MeshCoreTransmitter, TxUnsent
 
 
@@ -61,3 +61,12 @@ def test_oversized_verification_is_reported_without_queueing():
     assert len(FINAL_VERIFICATION_MESSAGE.encode()) == 134
     assert len(FINAL_VERIFICATION_MESSAGE.encode()) > 126
     assert db.errors and "exceeds MeshCore limit" in db.errors[0][1]
+
+
+def test_source_note_moves_whole_to_next_part_when_last_part_is_full():
+    parts = append_source_note(["A" * 30], "; check rfs.nsw.gov.au", 30)
+    assert parts == ["A" * 30, "check rfs.nsw.gov.au"]
+    assert all(len(part.encode("utf-8")) <= 30 for part in parts)
+
+def test_source_note_stays_with_last_part_when_it_fits():
+    assert append_source_note(["warning"], "; check bom.gov.au", 30) == ["warning; check bom.gov.au"]

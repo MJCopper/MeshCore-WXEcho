@@ -1,29 +1,26 @@
 {% for r in rows %}
 <div class="rec">
   <div class="rec-head">
-    <span class="rec-time">{{ r["ts"] | localtime(tz) }}</span>
+    <span class="rec-time">{{ r.ts | localtime(tz) }}</span>
     <span>
-      {% if r["id"] in superseded_ids %}<span class="pill">Earlier revision</span>{% endif %}
-      <span class="pill {{ r['disposition'] }}">{{ disp_label.get(r["disposition"], r["disposition"]) }}</span>
-      {% if r["transmit_status"] %}<span class="pill {{ r['transmit_status'] }}">{{ tx_label.get(r["transmit_status"], r["transmit_status"]) }}</span>{% endif %}
+      <span class="pill radio">{{ r.source_label }}</span>
+      {% if r.id in superseded_ids %}<span class="pill">Earlier revision</span>{% endif %}
+      {% if r.disposition %}<span class="pill {{ r.disposition }}">{{ disp_label.get(r.disposition, r.disposition) }}</span>{% endif %}
+      {% if r.transmit_status %}<span class="pill {{ r.transmit_status }}">{{ tx_label.get(r.transmit_status, r.transmit_status) }}</span>{% endif %}
     </span>
   </div>
-  <div class="rec-event">{{ r["event"] }}</div>
+  <div class="rec-event">{% if r.metadata.level %}{{ r.metadata.level }} · {% endif %}{{ r.title }}</div>
   <div class="rec-msgrow">
     <div class="rec-msgwrap">
       <div class="rec-lbl">Prepared message</div>
-      {% if r["transmitted_text"] %}
-      <div class="rec-msg">{{ r["transmitted_text"] }}</div>
-      {% else %}
-      <div class="rec-msg none">not transmitted</div>
-      {% endif %}
+      {% if r.transmitted_text %}<div class="rec-msg">{{ r.transmitted_text }}</div>
+      {% else %}<div class="rec-msg none">No message prepared</div>{% endif %}
     </div>
-    {% if r["detail"] %}<div class="rec-detail">{{ r["detail"] }}</div>{% endif %}
+    {% if r.detail %}<div class="rec-detail">{{ r.detail }}</div>{% endif %}
   </div>
-  {% if r["area"] %}
-  <div class="rec-areawrap">
-    <div class="rec-lbl">Area</div>
-    <div class="rec-area">{{ r["area"] }}</div>
+  {% if r.area or r.metadata.status %}
+  <div class="rec-areawrap"><div class="rec-lbl">Area and status</div>
+    <div class="rec-area">{{ r.area }}{% if r.metadata.status %} · {{ r.metadata.status }}{% endif %}</div>
   </div>
   {% endif %}
 </div>

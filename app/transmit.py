@@ -920,15 +920,15 @@ class TransmitManager:
                 self._verification_in_flight = True
             try:
                 ok, err = await self._transmit_item(item)
-                if item.on_result is not None:
-                    self._safe_result(item.on_result, ok, err)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                # A failure here (e.g. a DB write erroring on a full disk) must not
-                # kill the worker -- that would silently stop ALL future broadcasts.
+            except Exception as exc:
+                # A failed iteration must complete its callback so history can retry.
                 logger.exception("transmit worker iteration error")
-                ok = False
+                ok, err = False, str(exc)
+            try:
+                if item.on_result is not None:
+                    self._safe_result(item.on_result, ok, err)
             finally:
                 if item.verification:
                     self._verification_in_flight = False

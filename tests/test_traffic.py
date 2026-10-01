@@ -1,0 +1,188 @@
+"""Live Traffic NSW feed, council and sending behavior."""
+import time
+from dataclasses import replace
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.db import Database
+from app.traffic.feed import TrafficItem, council_at, parse_feed
+from app.traffic.poller import TrafficPoller
+from app.traffic.web import router
+
+
+POLYGONS = [{"type": "Feature", "properties": {"lganame": "Central Coast"},
+             "geometry": {"type": "Polygon", "coordinates": [[[150, -34], [152, -34],
+                                                             [152, -32], [150, -32], [150, -34]]]}}]
+
+
+def item(item_id="incident:1", feed="incident", category="CRASH", **changes):
+    event = TrafficItem(item_id, feed, category, "CRASH", "Pacific Highway", "Gosford", "",
+                        "Northbound", "Road closed", "Avoid area", 151, -33, None, None,
+                        False, time.time())
+    return replace(event, **changes)
+
+
+class Client:
+    def __init__(self, items):
+        self.items = items
+
+    async def fetch(self):
+        return self.items
+
+    async def boundaries(self):
+        return POLYGONS
+
+
+class Tx:
+    message_budget = 145
+
+    def __init__(self):
+        self.sent = []
+
+    def enqueue(self, text, on_result=None, delay_after=None):
+        self.sent.append((text, on_result))
+        return True
+
+    def enqueue_verification(self, text, on_result=None, allow_new=True):
+        return True
+
+
+def configure(db, dry_run=False):
+    db.set_setting("traffic_enabled", True)
+    db.set_setting("traffic_councils", ["Central Coast"])
+    db.set_setting("traffic_types", ["incident", "regional", "flood"])
+    db.set_setting("dry_run", dry_run)
+
+
+def test_parse_status_and_point_in_council():
+    payload = {"type": "FeatureCollection", "lastPublished": int(time.time() * 1000),
+               "features": [{"id": 2, "geometry": {"coordinates": [151, -33]},
+                             "properties": {"displayName": "CRASH", "mainCategory": "CRASH",
+                                            "ended": True, "roads": [{"mainStreet": "Pacific Highway"}]}}]}
+    parsed = parse_feed("incident", payload)[0]
+    assert parsed.item_id == "incident:2"
+    assert not parsed.active()
+    assert council_at(151, -33, POLYGONS) == "Central Coast"
+    assert not council_at(153, -33, POLYGONS)
+    assert not item(start=time.time() + 3600).active()
+
+
+@pytest.mark.asyncio
+async def test_first_live_poll_is_baseline_then_new_council_sends_current_item():
+    db = Database(":memory:")
+    configure(db)
+    tx = Tx()
+    client = Client([item()])
+    poller = TrafficPoller(db, tx, client)
+    await poller.poll_once()
+    assert tx.sent == []
+    assert db.latest_service_history("traffic", "incident:1")["disposition"] == "baseline"
+    await poller.poll_once()
+    assert tx.sent == []
+    client.items = [item(), item("incident:2", lon=153, council="Cessnock")]
+    await poller.poll_once()
+    assert tx.sent == []
+    assert db.latest_service_history("traffic", "incident:2")["disposition"] == "excluded-council"
+    db.set_setting("traffic_councils", ["Central Coast", "Cessnock"])
+    await poller.poll_once()
+    assert len(tx.sent) == 1
+    tx.sent[0][1](True, "")
+    assert db.traffic_get_item("incident:2")["last_sent_hash"] == client.items[1].revision
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_ended_future_and_roadwork_are_recorded_but_not_sent():
+    db = Database(":memory:")
+    configure(db)
+    db.set_setting("traffic_baseline_done", True)
+    tx = Tx()
+    events = [item("incident:ended", ended=True),
+              item("incident:future", start=time.time() + 3600),
+              item("roadwork:1", feed="roadwork", category="SCHEDULED ROADWORK")]
+    poller = TrafficPoller(db, tx, Client(events))
+    await poller.poll_once()
+    assert not tx.sent
+    assert db.latest_service_history("traffic", "incident:ended")["disposition"] == "excluded-ended-or-not-yet-active"
+    assert db.latest_service_history("traffic", "roadwork:1")["disposition"] == "excluded-hazard-type"
+    db.set_setting("traffic_types", ["incident", "roadwork"])
+    await poller.poll_once()
+    assert len(tx.sent) == 1
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_records_message_without_radio():
+    db = Database(":memory:")
+    configure(db, dry_run=True)
+    tx = Tx()
+    await TrafficPoller(db, tx, Client([item()])).poll_once()
+    row = db.latest_service_history("traffic", "incident:1")
+    assert row["transmit_status"] == "dry-run"
+    assert "Pacific Highway" in row["transmitted_text"]
+    assert not tx.sent
+    db.close()
+
+
+def test_traffic_settings_page_and_save():
+    db = Database(":memory:")
+    app = FastAPI()
+    app.include_router(router)
+    app.state.db = db
+    app.state.tx = Tx()
+    app.state.traffic_poller = type("Poller", (), {"poke": lambda self: None})()
+    client = TestClient(app)
+    page = client.get("/settings/traffic")
+    assert page.status_code == 200
+    assert 'name="traffic_poll_minutes" type="number" min="5"' in page.text
+    response = client.post("/settings/traffic", data={"traffic_enabled": "1",
+                       "traffic_councils": "Central Coast", "traffic_types": "incident"},
+                       follow_redirects=False)
+    assert response.status_code == 303
+    assert db.get_setting("traffic_councils") == ["Central Coast"]
+    client.post("/settings/traffic", data={"traffic_poll_minutes": "2"}, follow_redirects=False)
+    assert db.get_setting("traffic_poll_minutes") == 5
+    client.post("/settings/traffic", data={"traffic_poll_minutes": "17"}, follow_redirects=False)
+    assert db.get_setting("traffic_poll_minutes") == 17
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_preview_can_send_when_switched_live():
+    db = Database(":memory:")
+    configure(db, dry_run=True)
+    tx = Tx()
+    poller = TrafficPoller(db, tx, Client([item()]))
+    await poller.poll_once()
+    assert not tx.sent
+    db.set_setting("dry_run", False)
+    await poller.poll_once()
+    assert len(tx.sent) == 1
+    assert db.latest_service_history("traffic", "incident:1")["transmit_status"] == "queued"
+    assert db.traffic_recover_queued() == 1
+    await poller.poll_once()
+    assert len(tx.sent) == 2
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_item_is_recorded_without_claiming_road_reopened():
+    db = Database(":memory:")
+    configure(db)
+    db.set_setting("traffic_baseline_done", True)
+    tx = Tx()
+    client = Client([item()])
+    poller = TrafficPoller(db, tx, client)
+    await poller.poll_once()
+    tx.sent[0][1](True, "")
+    client.items = []
+    await poller.poll_once()
+    assert db.latest_service_history("traffic", "incident:1")["transmit_status"] == "success"
+    await poller.poll_once()
+    row = db.latest_service_history("traffic", "incident:1")
+    assert row["disposition"] == "absent-from-feed"
+    assert "unconfirmed" in row["detail"]
+    assert len(tx.sent) == 1
+    db.close()

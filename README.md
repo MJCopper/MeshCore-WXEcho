@@ -4,9 +4,31 @@
 
 ---
 
-# MeshCore BOM Weather
+# MeshCore WXEcho
 
-MeshCore BOM Weather polls official Australian Bureau of Meteorology warning RSS feeds and broadcasts selected warnings over a MeshCore radio. It is a small self-hosted web app for a Raspberry Pi, Linux host, Windows machine, or Docker.
+WXEcho polls official Australian Bureau of Meteorology warning RSS feeds, NSW RFS incident data and public Live Traffic NSW GeoJSON feeds, then broadcasts selected notices over a MeshCore radio. It is a small self-hosted web app for a Raspberry Pi, Linux host, Windows machine, or Docker.
+
+## BOM current warnings
+
+BOM, RFS and Live Traffic NSW each have their own enable control and polling interval in minutes (minimum 5). BOM monitoring remains enabled after upgrade unless you turn it off in BOM settings. The **BOM** page shows items in the latest successfully fetched warning feeds for the selected regions, including each region's last successful fetch time. If one region fails during a partial poll, its previous snapshot remains visible with its older timestamp; broadcast History remains separate. The menu has dedicated BOM, NSW RFS and Live Traffic NSW service pages.
+
+## NSW RFS Fires Near Me
+
+WXEcho can monitor the official NSW RFS current-incidents GeoJSON feed as a separate source. Open **NSW RFS** to enable monitoring, choose one or more NSW council areas (or All NSW), and select alert levels. Emergency Warning and Watch and Act are selected initially; Advice is optional. The council filter applies to every level. No RFS messages are sent until monitoring and council coverage are selected. The global Dry Run setting also applies to RFS.
+
+RFS incidents have their own live view; BOM and RFS broadcast history appear together in History with a source filter. WXEcho checks the RFS feed at its configured interval (minimum 5 minutes); the RFS says incident data is updated every 30 minutes. Incident locations may be approximate. Source: © State of New South Wales (NSW Rural Fire Service). For current information go to [rfs.nsw.gov.au](https://www.rfs.nsw.gov.au/).
+
+## Live Traffic NSW
+
+Live Traffic NSW is a separate, disabled-by-default service. Configure it under **Settings → Live Traffic NSW** with council areas and hazard feeds. It uses keyless Transport for NSW public GeoJSON feeds and the global Dry Run setting. Incident, flood and local council feeds are selected initially; scheduled roadworks require an explicit Roadwork selection. Ended and future items are recorded but never broadcast. Fire-feed notices are suppressed while RFS monitoring is enabled to avoid duplicate fire broadcasts. Existing items on the first live poll are recorded as a baseline without transmitting; newly selected councils can then send currently active matching items. Feed disappearance is recorded after two successful polls without claiming a road has reopened.
+
+State-road coordinates are matched locally against a simplified NSW Spatial Services council-boundary snapshot (`app/traffic/nsw_lga.geojson.gz`, obtained 1 October 2026); regional council names are a fallback. Boundary locations are approximate, especially near borders. Source: © Transport for NSW, [Live Traffic Hazards dataset](https://data.nsw.gov.au/data/dataset/2-live-traffic-hazards). Verify current conditions at [livetraffic.com](https://www.livetraffic.com/).
+
+## Settings and history
+
+The Settings hub has separate pages for General, BOM, NSW RFS, Live Traffic NSW, MeshCore connection and MeshCore companion controls. Saving one section does not replace settings in another. The History page combines BOM, RFS and Live Traffic NSW records by timestamp and can filter by source, delivery status and date. Source-specific details appear when available. Existing records are copied once into the shared history table on upgrade; the old tables remain untouched as a backup.
+
+Additional services register a stable source ID and label in `app/history.py`, then write through `Database.add_service_history`. Optional source-specific metadata and a registered facet can be shown without adding another history table.
 
 ## Features
 
@@ -30,7 +52,7 @@ Open `http://<host>:8110` and configure the BOM regions and MeshCore connection 
 
 ### Data persistence and backup
 
-Docker stores settings, BOM history, alert state, events and the transmit log in `data/wx-echo.db` on the host. `docker compose restart`, `stop`, `up` and container recreation retain this file. Keep the `data/` directory when moving or reinstalling WXEcho; a different checkout has a different `data/` directory.
+Docker stores settings, shared service history, alert state, events and the transmit log in `data/wx-echo.db` on the host. `docker compose restart`, `stop`, `up` and container recreation retain this file. Keep the `data/` directory when moving or reinstalling WXEcho; a different checkout has a different `data/` directory.
 
 After updating the application code, run `docker compose up -d --build` to rebuild and recreate the container. `docker compose restart` keeps the existing image and will not apply code changes.
 
@@ -64,7 +86,7 @@ python -m venv .venv
 
 The application uses BOM's public state-based warning RSS feeds, including the warning link and product identifier supplied by BOM. RSS items are normalized into provider-neutral alerts before filtering and deduplication. BOM's feed documentation notes that RSS should not be the sole source of warning information and requires links back to the full BOM warning product.
 
-Recent warning revisions and BOM History record each distinct version received from the selected feeds, including warnings excluded by broadcast filters. An unchanged warning is not added again on every poll. The Events log records each dry-run attempt, so it can grow while History stays the same. The unofficial verification message is queued after warning parts and sent at most once per five minutes on the live channel; its last successful send time survives restarts. Dry-run shows the same five-minute cadence.
+Recent warning revisions and the History page record each distinct BOM version received from the selected feeds, including warnings excluded by broadcast filters. An unchanged warning is not added again on every poll. The Events log records each dry-run attempt, so it can grow while History stays the same. The unofficial verification message is queued after warning parts and sent at most once per five minutes on the live channel; its last successful send time survives restarts. Dry-run shows the same five-minute cadence.
 
 The default broadcast policy includes all BOM warning products. Settings can instead select individual Australian warning products, plus additional products such as Flood Watch, Tropical Cyclone Advice, Road Weather Alert and Bush Walkers Weather Alert. Timestamped RSS titles and `Marine Wind Warning Summary` items are normalized before filtering; qualified flood products and numbered tropical cyclone products match their corresponding product selection. For marine wind warnings whose RSS item contains only a statewide summary, WXEcho resolves the linked BOM product ID and reads the warning detail API. Strong Wind Warning areas and cancellations are sent as separately labelled parts. If detail is unavailable, it falls back to the RSS summary.
 
