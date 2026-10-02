@@ -70,3 +70,27 @@ def test_source_note_moves_whole_to_next_part_when_last_part_is_full():
 
 def test_source_note_stays_with_last_part_when_it_fits():
     assert append_source_note(["warning"], "; check bom.gov.au", 30) == ["warning; check bom.gov.au"]
+
+
+@pytest.mark.asyncio
+async def test_unreadable_local_tx_counter_is_not_reported_as_success(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "meshcore", SimpleNamespace(EventType=SimpleNamespace(ERROR="error")))
+    radio = MeshCoreTransmitter("serial", "/dev/null")
+    radio._sender_name = "WXEcho"
+    calls = []
+
+    async def send_chan_msg(channel, text):
+        calls.append((channel, text))
+        return SimpleNamespace(type="ok")
+
+    async def unreadable_counter():
+        return None
+
+    radio._mc = SimpleNamespace(commands=SimpleNamespace(send_chan_msg=send_chan_msg))
+    monkeypatch.setattr(radio, "_flood_tx", unreadable_counter)
+    with pytest.raises(TxUnsent) as raised:
+        await radio.send_text("warning", 0)
+    assert raised.value.category == "unverified"
+    assert calls == [(0, "warning")]

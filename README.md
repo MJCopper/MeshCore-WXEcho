@@ -30,6 +30,16 @@ The Settings hub has separate pages for General, BOM, NSW RFS, Live Traffic NSW,
 
 Additional services register a stable source ID and label in `app/history.py`, then write through `Database.add_service_history`. Optional source-specific metadata and a registered facet can be shown without adding another history table. The dashboard shows the enabled state, poll interval, and last successful poll for BOM, RFS and Live Traffic. Recent Notices contains only successfully transmitted service notices; Dry Run, queued, failed and excluded entries remain in History.
 
+## Message delivery
+
+Automated notices from all services use one bounded radio queue. A multipart notice enters the queue as a complete group or waits for space; older queued parts are never evicted to admit new ones. Emergency Warning RFS notices have the highest priority, followed by BOM, other RFS notices, and Live Traffic NSW. The unofficial verification message remains after queued notices. An interrupted or failed notice is retried on a later successful poll if the source item remains current. Parts already confirmed by the local radio are not resent when the prepared text is unchanged.
+
+History shows each part's outcome and the time the local radio confirmed transmission. **Locally transmitted does not mean received by another node.** If the radio's transmission counter cannot be read, WXEcho records an unverified failure instead of claiming confirmation; a later poll can retry, so duplicate reception remains possible. Feed polling success and radio transmission status are separate. BOM and RFS send matching current items when enabled; Live Traffic NSW records items on its first live poll as a baseline to avoid a burst of existing traffic notices.
+
+## Broadcast content
+
+BOM, NSW RFS and Live Traffic NSW notices use the same on-air framing: source, NEW/UPDATE/CANCELLED action, hazard or alert level, and a complete `check …` source note. Multipart notices repeat the source and context on every part and share a short reference and part number. The source note stays whole; if it needs a separate part, that part is numbered too. BOM area lists and available warning summaries are split across messages rather than shortened to “surrounding areas”. Traffic notices include both impact and distinct advice when supplied. BOM dates and reliable Traffic end times include the local date; RFS update strings are not broadcast as times because their timezone is not established by the feed.
+
 ## Features
 
 - NSW BOM warning feed with optional NSW council filtering.

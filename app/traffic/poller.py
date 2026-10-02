@@ -5,8 +5,9 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from ..config import FINAL_VERIFICATION_MESSAGE, MAX_PAYLOAD_BYTES, QUEUE_MAX, VERIFICATION_INTERVAL_SECONDS, polling_seconds
-from ..formatter import _split_complete_message, append_source_note
+from ..config import FINAL_VERIFICATION_MESSAGE, MAX_PAYLOAD_BYTES, VERIFICATION_INTERVAL_SECONDS, polling_seconds
+from ..formatter import compact_topic, format_epoch_until, frame_notice
+from ..delivery import permanently_unsendable, queue_refusal, record_part, remaining_parts, submit_notice
 from ..rfs.councils import COUNCILS
 from ..rfs.feed import council_key
 from .feed import SOURCE_URL, TYPES, TrafficClient, TrafficFeedError, council_at_prepared, prepare_councils
@@ -14,17 +15,34 @@ from .feed import SOURCE_URL, TYPES, TrafficClient, TrafficFeedError, council_at
 logger = logging.getLogger("wx_echo.traffic")
 
 
-def format_item(item, council: str, budget: int) -> list[str]:
-    place = ", ".join(x for x in (item.road, item.suburb) if x)
-    body = f"Live Traffic NSW {item.title or item.category}"
+def format_item(item, council: str, budget: int, action: str = "NEW",
+                tz_name: str = "Australia/Sydney") -> list[str]:
+    topic = item.category or item.title or "Traffic notice"
+    if item.road:
+        topic += f" {item.road}"
+    topic, shortened = compact_topic(topic, "Live Traffic NSW", action, budget,
+                                     "check livetraffic.com")
+    details = [item.road] if shortened and item.road else []
+    if item.title and item.title.casefold() not in {item.category.casefold(), topic.casefold()}:
+        details.append(item.title)
+    place = item.suburb if item.road else ", ".join(x for x in (item.road, item.suburb) if x)
     if place:
-        body += f"; {place}"
+        details.append(place)
     if item.direction:
-        body += f"; {item.direction}"
+        details.append(item.direction)
     if item.impact:
-        body += f"; {item.impact}"
-    body += f"; {council} council"
-    return append_source_note(_split_complete_message(body, budget), "; check livetraffic.com", budget)
+        details.append(item.impact)
+    if item.advice and item.advice.casefold() not in item.impact.casefold() \
+            and item.advice.casefold() not in item.title.casefold():
+        details.append(item.advice)
+    if council:
+        details.append(f"{council} council")
+    end_time = format_epoch_until(item.end, tz_name)
+    if end_time:
+        details.append(end_time)
+    return frame_notice("Live Traffic NSW", action, topic,
+                        ["; ".join(details) or topic], "check livetraffic.com",
+                        budget, item.item_id)
 
 
 class TrafficPoller:
@@ -139,8 +157,13 @@ class TrafficPoller:
                     continue
                 if dry_run and latest_send["transmit_status"] == "dry-run":
                     continue
-            parts = format_item(item, council, budget)
+            action = ("UPDATE" if self.db.latest_successful_broadcast("traffic", item.item_id)
+                      else "NEW")
+            parts = format_item(item, council, budget, action=action,
+                                tz_name=settings.get("display_timezone", "Australia/Sydney"))
             message = " || ".join(parts)
+            if permanently_unsendable(latest_send, item.revision, message):
+                continue
             if dry_run:
                 self._history(item, council, text=message, status="dry-run")
                 continue
@@ -149,16 +172,22 @@ class TrafficPoller:
                               detail="Existing item on first live poll; no radio send")
                 self.db.traffic_mark_sent(item.item_id, item.revision)
                 continue
-            queue_depth = getattr(self.tx, "queue_depth", 0)
-            if queue_depth + len(parts) > QUEUE_MAX - 4:
-                if not latest or latest["revision_hash"] != item.revision or latest["disposition"] != "deferred-queue":
-                    self._history(item, council, text=message, disposition="deferred-queue",
-                                  detail="Waiting for space in the MeshCore send queue")
+            retry_row = (latest_send if latest_send and latest_send["revision_hash"] == item.revision
+                         and latest_send["transmitted_text"] == message
+                         and latest_send["transmit_status"] in ("failed", "interrupted", "deferred") else None)
+            row_id = retry_row["id"] if retry_row else self._history(item, council, text=message, status="queued")
+            indices = remaining_parts(retry_row, message, parts)
+            if not indices:
+                self.db.update_service_history(row_id, "success")
+                self.db.traffic_mark_sent(item.item_id, item.revision)
                 continue
-            row_id = self._history(item, council, text=message, status="queued")
-            state = {"remaining": len(parts), "ok": True, "error": ""}
+            if retry_row:
+                self.db.update_service_history(row_id, "queued")
+            state = {"remaining": len(indices), "ok": True, "error": ""}
 
-            def on_result(ok, error="", event=item, row=row_id, result=state):
+            def on_result(index, ok, error="", event=item, row=row_id, result=state,
+                          indexes=tuple(indices), total=len(parts)):
+                record_part(self.db, row, indexes[index], total, ok, error)
                 result["remaining"] -= 1
                 if not ok:
                     result["ok"] = False
@@ -172,9 +201,13 @@ class TrafficPoller:
                     self.db.update_service_history(row, "failed", result["error"])
                     self.db.add_error("traffic", f"Traffic broadcast failed: {event.title}: {result['error']}")
 
-            for part in parts:
-                self.tx.enqueue(part, on_result=on_result, delay_after=3)
-            queued = True
+            if submit_notice(self.tx, [parts[i] for i in indices], on_result, priority=5):
+                queued = True
+            else:
+                status, reason = queue_refusal(parts)
+                self.db.update_service_history(row_id, status, reason)
+                if status == "failed":
+                    self.db.add_error("traffic", reason)
         for missing in self.db.traffic_missing_after_poll({item.item_id for item in items}):
             if missing["missing_polls"] != 2 or not missing["last_sent_hash"]:
                 continue

@@ -5,23 +5,23 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from .bom import BOMClient, BOMError
 from .bom_enricher import BOMWarningEnricher
 from .bom_area import match_councils
 from .config import (
-    BURST_GAP_SECONDS,
     FINAL_VERIFICATION_MESSAGE,
     MAX_PAYLOAD_BYTES,
-    MULTIPART_GAP_SECONDS,
     polling_seconds,
     POLL_HARD_TIMEOUT,
     VERIFICATION_INTERVAL_SECONDS,
 )
 from .dedupe import Decision, decide
+from .delivery import permanently_unsendable, queue_refusal, record_part, remaining_parts, submit_notice
 from .filters import FilterRules, should_include
-from .formatter import build_mesh_parts, _split_complete_message, append_source_note
+from .formatter import build_mesh_parts, frame_notice, marine_notice_sections
 from .models import Alert
 from .rfs.feed import council_key
 from .traffic.feed import TrafficClient, prepare_councils
@@ -235,21 +235,42 @@ class BomPoller:
                        + (f" ({', '.join(match.councils)})" if match.councils else "")
                        + (f" via {match.method}" if match.method else ""))
         budget = getattr(self._tx, "message_budget", MAX_PAYLOAD_BYTES)
-        source_note = "; check bom.gov.au"
-        body_budget = budget - len(source_note.encode("utf-8"))
-        if body_budget <= 12:
-            raise ValueError("MeshCore message budget too small for BOM source note")
-        body_parts = (_split_complete_message(_format_cancel(alert, tz_name), body_budget)
-                      if decision.disposition == "cancelled"
-                      else build_mesh_parts(alert, tz_name, max_bytes=body_budget))
-        parts = append_source_note(body_parts, source_note, budget)
+        topic = alert.event
+        if decision.disposition == "cancelled":
+            topic = re.sub(r"^Cancellation of\s+", "", topic, flags=re.I)
+            body_parts = [_format_cancel(alert, tz_name)]
+            action = "CANCELLED"
+        else:
+            action = "UPDATE" if decision.disposition == "update" else "NEW"
+            if alert.warning_sections:
+                body_parts = marine_notice_sections(alert, tz_name, action)
+            else:
+                body_parts = build_mesh_parts(alert, tz_name, max_bytes=budget, split=False)
+                if body_parts:
+                    first = re.sub(r"^\d+/\d+\s+", "", body_parts[0])
+                    if first.startswith(topic):
+                        body_parts[0] = first[len(topic):].lstrip()
+        parts = frame_notice("BOM", action, topic, body_parts,
+                             "check bom.gov.au", budget, alert.alert_id)
         logged_text = " || ".join(parts)
 
         coverage = json.dumps([all_councils, sorted(selected), include_unknown],
                               separators=(",", ":"))
         coverage_hash = hashlib.sha256(coverage.encode()).hexdigest()[:8]
         revision_hash = f"{alert.revision_hash()}:{coverage_hash}"
-        if latest is None or latest["revision_hash"] != revision_hash:
+        if permanently_unsendable(latest, revision_hash, logged_text):
+            return False
+        if (decision.transmit and not dry_run and latest is not None
+                and latest["revision_hash"] == revision_hash
+                and latest["transmit_status"] in ("queued", "success")):
+            return False
+        retry_existing = (decision.transmit and not dry_run and latest is not None
+                          and latest["revision_hash"] == revision_hash
+                          and latest["transmitted_text"] == logged_text
+                          and latest["transmit_status"] in ("failed", "interrupted", "deferred"))
+        if latest is None or latest["revision_hash"] != revision_hash or (
+                decision.transmit and not dry_run and not retry_existing
+                and latest["transmit_status"] in ("failed", "interrupted", "deferred")):
             detail = decision.detail + area_detail
             history_text = logged_text if decision.transmit else ""
             transmit_status = "queued" if decision.transmit else None
@@ -286,10 +307,17 @@ class BomPoller:
                 self._db.add_event("INFO", f"[DRY-RUN] would send: {part}")
             return True
 
+        indices = remaining_parts(latest if retry_existing else None, logged_text, parts)
+        if not indices:
+            self._db.update_history_transmit_status(history_id, "success")
+            self._record_state(alert, decision)
+            return False
         fail_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        aggregate = {"remaining": len(parts), "all_ok": True, "first_err": ""}
+        aggregate = {"remaining": len(indices), "all_ok": True, "first_err": ""}
 
-        def _on_result(ok, err="", a=alert, d=decision, t=logged_text, ts=fail_ts, row_id=history_id):
+        def _on_result(index, ok, err="", a=alert, d=decision, t=logged_text,
+                       ts=fail_ts, row_id=history_id, indexes=tuple(indices), total=len(parts)):
+            record_part(self._db, row_id, indexes[index], total, ok, err)
             if not ok:
                 aggregate["all_ok"] = False
                 if not aggregate["first_err"]:
@@ -311,9 +339,12 @@ class BomPoller:
             self._db.add_event("ALARM", f"BROADCAST FAILED, will retry: {a.event} for {(a.area_desc or '')[:40]}")
             logger.error("broadcast FAILED on MeshCore: %s", t)
 
-        for idx, part in enumerate(parts):
-            delay_after = MULTIPART_GAP_SECONDS if idx < (len(parts) - 1) else BURST_GAP_SECONDS
-            self._tx.enqueue(part, channel, on_result=_on_result, delay_after=delay_after)
+        if not submit_notice(self._tx, [parts[i] for i in indices], _on_result, priority=1):
+            status, reason = queue_refusal(parts)
+            self._db.update_history_transmit_status(history_id, status, reason)
+            if status == "failed":
+                self._db.add_error("broadcast", reason)
+            return False
         self._db.add_event("INFO", f"queued {decision.disposition} ({len(parts)} part): {logged_text}")
         logger.info("alert %s -> %s%s", alert.alert_id, decision.disposition,
                     " (dry-run)" if dry_run else "",
@@ -371,10 +402,7 @@ class BomPoller:
 
 
 def _format_cancel(alert: Alert, tz_name: str) -> str:
-    from .formatter import PREFIX, _area_string
+    from .formatter import _area_string
 
     area = _area_string(alert.area_desc)
-    body = f"CANCELLED: {alert.event}"
-    if area:
-        body += f": {area}"
-    return PREFIX + body
+    return f"for {area}" if area else "warning cancelled"

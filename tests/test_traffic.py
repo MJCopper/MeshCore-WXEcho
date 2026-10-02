@@ -122,7 +122,8 @@ async def test_ended_future_and_roadwork_are_recorded_but_not_sent():
     assert db.latest_service_history("traffic", "roadwork:1")["disposition"] == "excluded-hazard-type"
     db.set_setting("traffic_types", ["incident", "roadwork"])
     await poller.poll_once()
-    assert len(tx.sent) == 1
+    assert all("SCHEDULED ROADWORK" in text for text, _ in tx.sent)
+    assert tx.sent[-1][0].endswith("check livetraffic.com")
     db.close()
 
 
@@ -207,4 +208,24 @@ async def test_missing_item_is_recorded_without_claiming_road_reopened():
     assert row["disposition"] == "absent-from-feed"
     assert "unconfirmed" in row["detail"]
     assert len(tx.sent) == 1
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_traffic_revision_is_labelled_update_after_successful_broadcast():
+    db = Database(":memory:")
+    configure(db)
+    db.set_setting("traffic_baseline_done", True)
+    tx = Tx()
+    client = Client([item()])
+    poller = TrafficPoller(db, tx, client)
+    await poller.poll_once()
+    assert tx.sent and "Live Traffic NSW NEW" in tx.sent[0][0]
+    for _, callback in tx.sent:
+        callback(True, "")
+    first_count = len(tx.sent)
+    client.items = [item(impact="Two lanes closed", advice="Avoid the area")]
+    await poller.poll_once()
+    assert len(tx.sent) > first_count
+    assert "Live Traffic NSW UPDATE" in tx.sent[first_count][0]
     db.close()

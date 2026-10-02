@@ -13,9 +13,9 @@ def test_bom_warning_formats_in_australian_timezone():
     assert len(message.encode()) <= 195
 
 
-def test_multiple_districts_are_compacted():
+def test_multiple_districts_are_preserved():
     message = format_alert("Flood Warning", "Illawarra; Hunter; Central Coast", "", "Australia/Sydney", home_area="Hunter")
-    assert "Hunter and surrounding areas" in message
+    assert message == "Flood Warning for Illawarra, Hunter, Central Coast"
 
 
 def test_enriched_bom_warning_includes_locations_and_stays_within_limit():
@@ -103,10 +103,10 @@ def test_marine_warning_sections_keep_cancellations_distinct():
     )
     parts = build_mesh_parts(alert, "Australia/Sydney")
     assert len(parts) == 2
-    assert parts[0].startswith("Wednesday: Strong Wind Warning for Hunter Coast")
+    assert parts[0].startswith("Wednesday 30 Sep 2026: Strong Wind Warning for Hunter Coast")
     assert "Hunter Coast" in parts[0]
     assert "Illawarra Coast" in parts[0]
-    assert parts[1].startswith("Wednesday: Cancellation of Marine Wind Warning for Batemans Coast")
+    assert parts[1].startswith("Wednesday 30 Sep 2026: Cancellation of Marine Wind Warning for Batemans Coast")
     assert "Batemans Coast" in parts[1]
     assert "Eden Coast" in parts[1]
     assert all(len(part.encode()) <= MAX_PAYLOAD_BYTES for part in parts)

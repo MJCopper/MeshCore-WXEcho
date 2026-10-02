@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS service_history (
     revision_hash TEXT NOT NULL DEFAULT '',
     metadata TEXT NOT NULL DEFAULT '{}',
     legacy_id INTEGER,
+    delivery_parts TEXT NOT NULL DEFAULT '[]',
+    transmitted_at TEXT NOT NULL DEFAULT '',
     UNIQUE(source, legacy_id)
 );
 CREATE INDEX IF NOT EXISTS idx_service_history_ts ON service_history(ts, id);
@@ -202,6 +204,11 @@ class Database:
                 self._conn.execute("ALTER TABLE history ADD COLUMN transmit_status TEXT")
             if "revision_hash" not in history_columns:
                 self._conn.execute("ALTER TABLE history ADD COLUMN revision_hash TEXT")
+            service_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(service_history)")}
+            if "delivery_parts" not in service_columns:
+                self._conn.execute("ALTER TABLE service_history ADD COLUMN delivery_parts TEXT NOT NULL DEFAULT '[]'")
+            if "transmitted_at" not in service_columns:
+                self._conn.execute("ALTER TABLE service_history ADD COLUMN transmitted_at TEXT NOT NULL DEFAULT ''")
             transmit_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(transmit_log)")
             }
@@ -226,6 +233,14 @@ class Database:
                 "(SELECT alert_id FROM history WHERE transmit_status = 'dry-run')"
             )
             self._migrate_service_history()
+            self._conn.execute("UPDATE service_history SET transmitted_at = ts "
+                               "WHERE transmit_status = 'success' AND transmitted_at = ''")
+            # The in-memory queue cannot survive a restart. Mark every unfinished
+            # notice so the next successful source poll can retry it.
+            self._conn.execute(
+                "UPDATE service_history SET transmit_status = 'interrupted', "
+                "detail = detail || '; interrupted before local transmission was confirmed' "
+                "WHERE transmit_status = 'queued'")
             # Retire only old BOM history with provenance proving another state.
             non_nsw_bom = (
                 "source = 'bom' AND ((json_extract(metadata, '$.region') IS NOT NULL "
@@ -477,16 +492,41 @@ class Database:
     def update_service_history(self, row_id: int, transmit_status: str,
                                detail: Optional[str] = None) -> None:
         with self._lock:
+            transmitted_at = _now() if transmit_status == "success" else None
             if detail is None:
                 self._conn.execute(
-                    "UPDATE service_history SET transmit_status = ? WHERE id = ?",
-                    (transmit_status, row_id),
+                    "UPDATE service_history SET transmit_status = ?, "
+                    "transmitted_at = COALESCE(?, transmitted_at) WHERE id = ?",
+                    (transmit_status, transmitted_at, row_id),
                 )
             else:
                 self._conn.execute(
-                    "UPDATE service_history SET transmit_status = ?, detail = ? WHERE id = ?",
-                    (transmit_status, detail, row_id),
+                    "UPDATE service_history SET transmit_status = ?, detail = ?, "
+                    "transmitted_at = COALESCE(?, transmitted_at) WHERE id = ?",
+                    (transmit_status, detail, transmitted_at, row_id),
                 )
+            self._conn.commit()
+
+    def record_delivery_part(self, row_id: int, index: int, total: int,
+                             ok: bool, error: str = "") -> None:
+        """Persist the local transmit outcome for each part of a notice."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT delivery_parts FROM service_history WHERE id = ?", (row_id,)
+            ).fetchone()
+            if row is None:
+                return
+            try:
+                parts = json.loads(row["delivery_parts"] or "[]")
+            except ValueError:
+                parts = []
+            while len(parts) < total:
+                parts.append({"status": "pending"})
+            parts[index] = {"status": "transmitted" if ok else "failed", "error": error}
+            self._conn.execute(
+                "UPDATE service_history SET delivery_parts = ? WHERE id = ?",
+                (json.dumps(parts), row_id),
+            )
             self._conn.commit()
 
     def successful_service_activity(self, now: datetime) -> dict[int, int]:
@@ -494,14 +534,35 @@ class Database:
         cutoff = (now - timedelta(days=7)).isoformat(timespec="seconds")
         with self._lock:
             rows = self._conn.execute(
-                "SELECT CAST((? - strftime('%s', ts)) / 86400 AS INTEGER) AS age_days, "
+                "SELECT CAST((? - strftime('%s', COALESCE(NULLIF(transmitted_at, ''), ts))) / 86400 AS INTEGER) AS age_days, "
                 "COUNT(*) AS total FROM service_history "
-                "WHERE transmit_status = 'success' AND ts >= ? "
+                "WHERE transmit_status = 'success' AND COALESCE(NULLIF(transmitted_at, ''), ts) >= ? "
                 "GROUP BY age_days",
                 (int(now.timestamp()), cutoff),
             ).fetchall()
         return {int(row["age_days"]): row["total"] for row in rows
                 if row["age_days"] is not None and 0 <= row["age_days"] < 7}
+
+    def latest_successful_broadcast(self, source: str, external_id: str):
+        """Find the latest notice confirmed by the local radio for this item."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM service_history WHERE source = ? AND external_id = ? "
+                "AND transmit_status = 'success' ORDER BY id DESC LIMIT 1",
+                (source, external_id),
+            ).fetchone()
+
+    def recent_delivery_failures(self, since: str, limit: int = 3) -> list[sqlite3.Row]:
+        """Newest unresolved local transmit failures across all services."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT h.* FROM service_history h "
+                "WHERE h.id = (SELECT MAX(b.id) FROM service_history b "
+                "WHERE b.source = h.source AND b.external_id = h.external_id "
+                "AND b.transmit_status IS NOT NULL) "
+                "AND h.transmit_status IN ('failed', 'interrupted') AND h.ts >= ? "
+                "ORDER BY h.ts DESC, h.id DESC LIMIT ?", (since, limit),
+            ).fetchall()
 
     def query_service_history(
         self, source: Optional[str] = None, disposition: Optional[str] = None,
@@ -555,6 +616,10 @@ class Database:
                 item["metadata"] = json.loads(item["metadata"] or "{}")
             except (TypeError, ValueError):
                 item["metadata"] = {}
+            try:
+                item["delivery_parts"] = json.loads(item["delivery_parts"] or "[]")
+            except (TypeError, ValueError):
+                item["delivery_parts"] = []
             out.append(item)
         return out
 

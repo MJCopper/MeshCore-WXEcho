@@ -55,7 +55,8 @@ DISP_LABELS = {
 
 TX_STATUS_LABELS = {
     "queued": "queued",
-    "success": "transmitted",
+    "deferred": "waiting for send queue",
+    "success": "locally transmitted",
     "failed": "failed",
     "dry-run": "dry-run",
     "interrupted": "interrupted",
@@ -154,7 +155,8 @@ def _dash_ctx(request) -> dict:
     seen_items = set()
     candidates = (db.query_service_history(transmit_status="success", limit=2000)
                   if hasattr(db, "query_service_history") else db.query_history(limit=200))
-    for r in sorted(candidates, key=lambda row: (row["ts"], row["id"] if "id" in row.keys() else 0),
+    for r in sorted(candidates, key=lambda row: (row.get("transmitted_at") or row["ts"],
+                                                 row["id"] if "id" in row.keys() else 0),
                     reverse=True):
         if r["transmit_status"] != "success":
             continue
@@ -173,7 +175,8 @@ def _dash_ctx(request) -> dict:
         "event": r["title"] if "title" in r.keys() else r["event"],
         "area": r["area"], "disposition": r["disposition"],
         "transmit_status": r["transmit_status"], "detail": r["detail"],
-        "text": r["transmitted_text"], "when": fmt_local(r["ts"], tz),
+        "text": r["transmitted_text"],
+        "when": fmt_local(r.get("transmitted_at") or r["ts"], tz),
     } for r in recent_rows]
     ltx = db.query_transmit_log(limit=1)
     last_tx = "-"
@@ -260,6 +263,12 @@ def _dash_ctx(request) -> dict:
     # 4. Backed-up queue.
     if tx.queue_depth > 5:
         problems.append(("warn", "Transmit queue backed up (%d waiting)." % tx.queue_depth))
+    if hasattr(db, "recent_delivery_failures"):
+        since = (now - datetime.timedelta(minutes=30)).isoformat(timespec="seconds")
+        for failed in db.recent_delivery_failures(since):
+            label = history_source_label(failed["source"])
+            problems.append(("warn", f"{label} local transmission {failed['transmit_status']}: "
+                                     f"{failed['title'][:55]}"))
     # 5. System clock skew vs BOM: makes alert "until" times wrong.
     skew = getattr(st, "clock_skew_seconds", None)
     if skew is not None and abs(skew) > 120:
@@ -353,7 +362,7 @@ def _history_context(request, source="", disposition="", transmit_status="",
                 disposition=disposition, transmit_status=transmit_status,
                 date_from=date_from, date_to=date_to, facet=facet,
                 dispositions=["sent", "filtered", "update", "cancelled"],
-                transmit_statuses=["queued", "success", "failed", "interrupted", "dry-run"])
+                transmit_statuses=["queued", "deferred", "success", "failed", "interrupted", "dry-run"])
 
 
 @router.get("/history", response_class=HTMLResponse)

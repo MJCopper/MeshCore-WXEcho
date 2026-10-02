@@ -161,7 +161,7 @@ def test_dashboard_and_history_render_populated_data():
 
     assert dashboard.status_code == 200
     assert "Recent Notices" in dashboard.text
-    assert "Successfully transmitted by this device" in dashboard.text
+    assert "Locally transmitted by this radio" in dashboard.text
     assert "NSW RFS" in dashboard.text
     assert "Live Traffic NSW" in dashboard.text
     assert "/dev/serial/by-id/usb-Seeed_XIAO-if00" in dashboard.text

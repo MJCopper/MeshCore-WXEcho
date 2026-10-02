@@ -32,6 +32,7 @@ class TxUnsent(Exception):
       'no_channel' - the configured channel index does not exist: config error
       'link'       - radio interface down / no response: reconnect, then retry
       'unsent'     - radio accepted the command but did not key up: wait/reconnect
+      'unverified' - the local TX counter was unreadable: do not blindly retry
     """
     def __init__(self, category: str, detail: str):
         super().__init__(detail)
@@ -117,13 +118,20 @@ class MeshCoreTransmitter(Transmitter):
         if getattr(res, "type", None) == EventType.ERROR:
             payload = getattr(res, "payload", {}) or {}
             reason = payload.get("reason", "") if isinstance(payload, dict) else ""
+        if getattr(res, "type", None) == EventType.ERROR:
+            raise TxUnsent("unsent", reason or "radio rejected channel message")
         if before is None:
-            return  # counter unreadable: fall back to best-effort (never block sends)
+            raise TxUnsent("unverified", "local TX counter unavailable; transmission cannot be confirmed")
+        counter_unreadable = False
         for _ in range(15):                       # poll up to ~4.5s
             await asyncio.sleep(0.3)
             after = await self._flood_tx()
-            if after is not None and after > before:
-                return                            # verified on the air (flood_tx advanced)
+            if after is None:
+                counter_unreadable = True
+            elif after > before:
+                return                            # verified locally (flood_tx advanced)
+        if counter_unreadable:
+            raise TxUnsent("unverified", "local TX counter became unreadable; transmission cannot be confirmed")
         detail = "radio did not transmit (TX counter did not advance%s)" % (
             "; %s" % reason if reason else "")
         raise TxUnsent("unsent", detail)
@@ -428,6 +436,8 @@ class QueueItem:
     delay_after: float = BURST_GAP_SECONDS
     on_result: object = None   # optional callable(ok: bool, err: str) invoked after the send
     verification: bool = False
+    priority: int = 3
+    notice_id: object = None
 
 
 def _build_transports(db) -> dict:
@@ -458,9 +468,10 @@ class TransmitManager:
     def __init__(self, db):
         self._db = db
         self._transports = _build_transports(db)
-        self._queue: deque[QueueItem] = deque(maxlen=QUEUE_MAX + 1)    # warnings plus one verification
+        self._queue: deque[QueueItem] = deque(maxlen=QUEUE_MAX + 1)    # 20 notice parts plus one verification
         self._queue_event = asyncio.Event()
         self._verification_in_flight = False
+        self._active_notice = None
         self._lock = asyncio.Lock()
         self._worker_task: asyncio.Task | None = None
         self._connection_task: asyncio.Task | None = None
@@ -664,33 +675,53 @@ class TransmitManager:
             self._queue.remove(pending)
             self._queue.append(pending)
             return True
-        if self._verification_in_flight or not allow_new or len(self._queue) == self._queue.maxlen:
+        if self._verification_in_flight or not allow_new or len(self._queue) >= QUEUE_MAX + 1:
             return False
         self._queue.append(QueueItem(text=text, delay_after=BURST_GAP_SECONDS,
                                      on_result=on_result, verification=True))
         self._queue_event.set()
         return True
 
-    def enqueue(self, text: str, channel: int | None = None, on_result=None,
-                delay_after: float = BURST_GAP_SECONDS) -> bool:
-        """Queue a BOM warning for the live channel. on_result(ok, err)
-        fires after the send with the REAL verified outcome."""
+    def enqueue_notice(self, parts: list[tuple[str, float]], on_result=None,
+                       priority: int = 3) -> bool:
+        """Admit every part of one notice together, or defer the whole notice.
+
+        A verification message may occupy the single reserved slot. Parts stay
+        adjacent in FIFO order, including when several pollers submit at once.
+        on_result(index, ok, error) runs once for each attempted part.
+        """
+        if not parts or len(parts) > QUEUE_MAX or sum(not item.verification for item in self._queue) + len(parts) > QUEUE_MAX:
+            return False
         pending = next((item for item in self._queue if item.verification), None)
         if pending is not None:
             self._queue.remove(pending)
-        dropped = len(self._queue) >= QUEUE_MAX
-        if dropped:
-            oldest = self._queue.popleft()
-            if oldest.on_result is not None:
-                self._safe_result(oldest.on_result, False, "dropped (queue full)")
-        self._queue.append(QueueItem(text=text, delay_after=max(0.0, float(delay_after)), on_result=on_result))
-        if pending is not None and len(self._queue) < self._queue.maxlen:
-            self._queue.append(pending)
+        new_items = []
+        notice_id = object()
+        for index, (text, delay_after) in enumerate(parts):
+            callback = (lambda ok, err="", i=index: on_result(i, ok, err)) if on_result else None
+            new_items.append(QueueItem(text=text, delay_after=max(0.0, float(delay_after)),
+                                       on_result=callback, priority=priority,
+                                       notice_id=notice_id))
+        waiting = list(self._queue)
+        protected = 0
+        while (protected < len(waiting) and self._active_notice is not None
+               and waiting[protected].notice_id is self._active_notice):
+            protected += 1
+        insertion = next((index for index in range(protected, len(waiting))
+                          if waiting[index].priority > priority), len(waiting))
+        waiting[insertion:insertion] = new_items
+        if pending is not None:
+            waiting.append(pending)
+        self._queue.clear()
+        self._queue.extend(waiting)
         self._queue_event.set()
-        if dropped:
-            logger.warning("transmit queue full; dropped oldest")
-            self._db.add_event("WARN", "transmit queue full; dropped oldest message")
-        return not dropped
+        return True
+
+    def enqueue(self, text: str, channel: int | None = None, on_result=None,
+                delay_after: float = BURST_GAP_SECONDS) -> bool:
+        """Queue a single live-channel message without evicting earlier notices."""
+        callback = (lambda index, ok, err: on_result(ok, err)) if on_result else None
+        return self.enqueue_notice([(text, delay_after)], callback)
 
     def _safe_result(self, cb, ok: bool, err: str = "") -> None:
         try:
@@ -759,7 +790,7 @@ class TransmitManager:
                 cat = exc.category
                 logger.warning("%s not sent (attempt %d/3): %s [%s]",
                                t.name, attempt, exc.detail, cat)
-                if cat in ("too_large", "no_channel"):
+                if cat in ("too_large", "no_channel", "unverified"):
                     break  # a retry cannot fix bad content/config; fail fast with the reason
                 if cat == "duty_cycle":
                     await asyncio.sleep(6)          # airtime cap: let the radio cool down
@@ -916,6 +947,8 @@ class TransmitManager:
                     return
                 continue
             item = self._queue.popleft()
+            if item.notice_id is not None:
+                self._active_notice = item.notice_id
             if item.verification:
                 self._verification_in_flight = True
             try:
@@ -932,6 +965,9 @@ class TransmitManager:
             finally:
                 if item.verification:
                     self._verification_in_flight = False
+                if (item.notice_id is not None and self._active_notice is item.notice_id
+                        and not any(pending.notice_id is item.notice_id for pending in self._queue)):
+                    self._active_notice = None
             if self._queue and item.delay_after > 0:
                 try:
                     await asyncio.sleep(item.delay_after)

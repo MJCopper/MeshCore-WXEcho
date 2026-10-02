@@ -65,7 +65,7 @@ async def test_rfs_filters_all_levels_by_selected_council_and_tracks_updates():
     poller = RFSPoller(db, tx, client)
     await poller.poll_once()
     assert len(tx.sent) == 1
-    assert "NSW RFS Watch and Act" in tx.sent[0][0]
+    assert "NSW RFS NEW Watch and Act" in tx.sent[0][0]
     assert len(tx.verification) == 1
     tx.sent[0][1](True, "")
     assert db.rfs_get_incident("1")["last_sent_hash"] == incident().revision
@@ -76,6 +76,7 @@ async def test_rfs_filters_all_levels_by_selected_council_and_tracks_updates():
     await poller.poll_once()
     assert len(tx.sent) == 2
     assert "Under control" in tx.sent[1][0]
+    assert "NSW RFS UPDATE" in tx.sent[1][0]
     assert len(db.rfs_history()) == 3
     assert any(row["disposition"] == "excluded-council" for row in db.rfs_history())
     db.close()

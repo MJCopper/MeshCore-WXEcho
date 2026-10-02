@@ -1,7 +1,7 @@
 {% for r in rows %}
 <div class="rec">
   <div class="rec-head">
-    <span class="rec-time">{{ r.ts | localtime(tz) }}</span>
+    <span class="rec-time">{{ r.ts | localtime(tz) }}{% if r.transmitted_at %} · locally transmitted {{ r.transmitted_at | localtime(tz) }}{% endif %}</span>
     <span>
       <span class="pill radio">{{ r.source_label }}</span>
       {% if r.id in superseded_ids %}<span class="pill">Earlier revision</span>{% endif %}
@@ -17,6 +17,7 @@
       {% else %}<div class="rec-msg none">No message prepared</div>{% endif %}
     </div>
     {% if r.detail %}<div class="rec-detail">{{ r.detail }}</div>{% endif %}
+    {% if r.delivery_parts %}<div class="rec-detail">Parts: {% for part in r.delivery_parts %}{{ loop.index }}/{{ r.delivery_parts|length }} {{ part.status }}{% if part.error %} ({{ part.error }}){% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</div>{% endif %}
   </div>
   {% if r.source == 'bom' and r.metadata.region %}
   <div class="rec-areawrap"><div class="rec-lbl">Council decision</div>

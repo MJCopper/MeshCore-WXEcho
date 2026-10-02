@@ -6,23 +6,30 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from ..config import FINAL_VERIFICATION_MESSAGE, MAX_PAYLOAD_BYTES, VERIFICATION_INTERVAL_SECONDS, polling_seconds
-from ..formatter import _split_complete_message, append_source_note
+from ..formatter import compact_topic, frame_notice
+from ..delivery import permanently_unsendable, queue_refusal, record_part, remaining_parts, submit_notice
 from .feed import LEVELS, RFSClient, RFSFeedError, council_key
 from .councils import COUNCILS
 
 logger = logging.getLogger("wx_echo.rfs")
 
 
-def format_incident(incident, budget: int) -> list[str]:
-    place = incident.location or incident.council or incident.name
-    body = f"NSW RFS {incident.level}: {incident.name}"
-    if place and council_key(place) != council_key(incident.name):
-        body += f"; {place}"
+def format_incident(incident, budget: int, action: str = "NEW") -> list[str]:
+    full_topic = f"{incident.level or 'Incident'}: {incident.name or 'unnamed incident'}"
+    topic, shortened = compact_topic(full_topic, "NSW RFS", action, budget,
+                                     "check rfs.nsw.gov.au")
+    details = [incident.name] if shortened and incident.name else []
+    if incident.location and council_key(incident.location) != council_key(incident.name):
+        details.append(incident.location)
+    if incident.kind and incident.kind.casefold() not in incident.name.casefold():
+        details.append(incident.kind)
     if incident.council:
-        body += f"; {incident.council} council"
+        details.append(f"{incident.council} council")
     if incident.status:
-        body += f"; {incident.status}"
-    return append_source_note(_split_complete_message(body, budget), "; check rfs.nsw.gov.au", budget)
+        details.append(incident.status)
+    return frame_notice("NSW RFS", action, topic,
+                        ["; ".join(details) or "current incident"], "check rfs.nsw.gov.au",
+                        budget, incident.incident_id)
 
 
 class RFSPoller:
@@ -119,15 +126,30 @@ class RFSPoller:
                 continue
             if latest and latest["revision_hash"] == incident.revision and latest["transmit_status"] == "dry-run" and dry_run:
                 continue
-            parts = format_incident(incident, budget)
+            action = "UPDATE" if previous and previous["last_sent_hash"] else "NEW"
+            parts = format_incident(incident, budget, action=action)
             text = " || ".join(parts)
+            if permanently_unsendable(latest, incident.revision, text):
+                continue
             if dry_run:
                 self.db.rfs_add_history(incident, text, "dry-run")
                 continue
-            row_id = self.db.rfs_add_history(incident, text, "queued")
-            result = {"remaining": len(parts), "ok": True, "error": ""}
+            retry_row = (latest if latest and latest["revision_hash"] == incident.revision
+                         and latest["transmitted_text"] == text
+                         and latest["transmit_status"] in ("failed", "interrupted", "deferred") else None)
+            row_id = retry_row["id"] if retry_row else self.db.rfs_add_history(incident, text, "queued")
+            indices = remaining_parts(retry_row, text, parts)
+            if not indices:
+                self.db.rfs_update_history(row_id, "success")
+                self.db.rfs_mark_sent(incident.incident_id, incident.revision)
+                continue
+            if retry_row:
+                self.db.rfs_update_history(row_id, "queued")
+            result = {"remaining": len(indices), "ok": True, "error": ""}
 
-            def on_result(ok, error="", item=incident, row=row_id, state=result):
+            def on_result(index, ok, error="", item=incident, row=row_id, state=result,
+                          indexes=tuple(indices), total=len(parts)):
+                record_part(self.db, row, indexes[index], total, ok, error)
                 state["remaining"] -= 1
                 if not ok:
                     state["ok"] = False
@@ -141,9 +163,14 @@ class RFSPoller:
                     self.db.rfs_update_history(row, "failed", state["error"])
                     self.db.add_error("rfs", f"RFS broadcast failed: {item.name}: {state['error']}")
 
-            for part in parts:
-                self.tx.enqueue(part, on_result=on_result, delay_after=3)
-            queued = True
+            if submit_notice(self.tx, [parts[i] for i in indices], on_result,
+                             priority=0 if incident.level == "Emergency Warning" else 2):
+                queued = True
+            else:
+                status, reason = queue_refusal(parts)
+                self.db.rfs_update_history(row_id, status, reason)
+                if status == "failed":
+                    self.db.add_error("rfs", reason)
         for missing in self.db.rfs_missing_after_poll({item.incident_id for item in incidents}):
             if missing["missing_polls"] != 2:
                 continue

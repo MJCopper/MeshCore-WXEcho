@@ -62,9 +62,9 @@ class _WarningPageParser(HTMLParser):
         self._parts = []
 
 
-def _clean_sentence(value: str, limit: int = 150) -> str:
+def _clean_sentence(value: str) -> str:
     value = re.sub(r"\s+", " ", value).strip(" .")
-    return value if len(value) <= limit else value[:limit].rsplit(" ", 1)[0] + "..."
+    return value
 
 
 def parse_warning_page(raw: str) -> BOMEnrichment:
@@ -77,7 +77,7 @@ def parse_warning_page(raw: str) -> BOMEnrichment:
             continue
         match = re.search(r"locations which may be affected include (.+?)(?:\.|$)", paragraph, re.IGNORECASE)
         if match and not locations:
-            locations = _clean_sentence(match.group(1), 110)
+            locations = _clean_sentence(match.group(1))
         lower = paragraph.lower()
         if "likely to produce" in lower:
             summaries.append((3, paragraph))
@@ -85,7 +85,7 @@ def parse_warning_page(raw: str) -> BOMEnrichment:
             summaries.append((2, paragraph))
         elif lower.startswith("weather situation:"):
             summaries.append((1, paragraph))
-    summary = _clean_sentence(max(summaries, key=lambda item: item[0])[1], 130) if summaries else ""
+    summary = _clean_sentence(max(summaries, key=lambda item: item[0])[1]) if summaries else ""
     return BOMEnrichment(locations=locations, summary=summary)
 
 
@@ -110,7 +110,7 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
                 r"locations which may be affected include (.+?)(?:\.|$)",
                 summary, re.IGNORECASE)
             if match and not locations:
-                locations = _clean_sentence(match.group(1), 110)
+                locations = _clean_sentence(match.group(1))
         for area in item.get("area", []) or []:
             area_name = _strip_markup(area.get("area_desc", ""))
             if area_name and area_name not in area_names:
@@ -127,15 +127,15 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
                     polygons.append(polygon)
     if not locations:
         locations = _clean_sentence(
-            _strip_markup(warning.get("area_summary", "")), 110)
+            _strip_markup(warning.get("area_summary", "")))
     if not locations and geocodes:
-        locations = _clean_sentence(", ".join(geocodes), 110)
+        locations = _clean_sentence(", ".join(geocodes))
     candidates = [s for s in summaries if "likely to produce" in s.lower()]
     if not candidates:
         candidates = summaries
     if not candidates:
         candidates = [_strip_markup(warning.get("phenomena_summary", ""))]
-    summary = _clean_sentence(candidates[0], 130) if candidates and candidates[0] else ""
+    summary = _clean_sentence(candidates[0]) if candidates and candidates[0] else ""
     sections = []
     for item in info:
         if str(item.get("is_hazard", "")).lower() != "true":

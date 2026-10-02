@@ -125,7 +125,11 @@ async def test_poller_queues_parts_then_final_verification_with_expected_delays(
 
     await poller._process(_warning_item(), rules, "Australia/Sydney", 0, dry_run=False)
 
-    assert [m["text"] for m in tx.enqueued] == ["1/2 first", "2/2 second; check bom.gov.au"]
+    assert len(tx.enqueued) == 2
+    assert all("BOM NEW" in m["text"] and "Severe Thunderstorm Warning" in m["text"]
+               for m in tx.enqueued)
+    assert "1/2" in tx.enqueued[0]["text"] and "first" in tx.enqueued[0]["text"]
+    assert "2/2" in tx.enqueued[1]["text"] and tx.enqueued[1]["text"].endswith("check bom.gov.au")
     assert tx.enqueued[0]["delay_after"] == MULTIPART_GAP_SECONDS
     assert tx.enqueued[1]["delay_after"] == BURST_GAP_SECONDS
     assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) <= 195
@@ -152,7 +156,8 @@ async def test_poller_cancellation_also_queues_final_verification(monkeypatch):
     await poller._process(item, rules, "Australia/Sydney", 0, dry_run=False)
 
     assert len(tx.enqueued) == 1
-    assert tx.enqueued[0]["text"].startswith("CANCELLED:")
+    assert tx.enqueued[0]["text"].startswith("BOM CANCELLED Severe Thunderstorm Warning")
+    assert "Cancellation of" not in tx.enqueued[0]["text"]
     assert tx.enqueued[0]["text"].endswith("; check bom.gov.au")
     assert tx.enqueued[0]["delay_after"] == BURST_GAP_SECONDS
 
@@ -202,7 +207,7 @@ async def test_poller_does_not_record_state_when_any_multipart_part_fails(monkey
     assert "broadcast failed: link down" in db.history_rows[0]["detail"]
     assert poller.status.last_broadcast_failure is not None
     assert "NOT SENT on MeshCore" in db.errors[-1][1]
-    assert "1/2 first" in db.errors[-1][1]
+    assert "1/2 Severe Thunderstorm Warning: first" in db.errors[-1][1]
 
 
 @pytest.mark.asyncio
@@ -218,12 +223,13 @@ async def test_poller_dry_run_logs_history_and_events_with_final_verification(mo
 
     assert tx.enqueued == []
     assert len(db.events) == 2
-    assert db.events[0][1] == "[DRY-RUN] would send: 1/2 first"
-    assert db.events[1][1] == "[DRY-RUN] would send: 2/2 second; check bom.gov.au"
+    assert db.events[0][1].startswith("[DRY-RUN] would send: BOM NEW")
+    assert "1/2 Severe Thunderstorm Warning: first" in db.events[0][1]
+    assert "2/2 Severe Thunderstorm Warning: second" in db.events[1][1]
+    assert db.events[1][1].endswith("check bom.gov.au")
     assert len(db.history_rows) == 1
-    assert db.history_rows[0]["transmitted_text"] == (
-        "1/2 first || 2/2 second; check bom.gov.au"
-    )
+    assert db.history_rows[0]["transmitted_text"] == " || ".join(
+        event.removeprefix("[DRY-RUN] would send: ") for _, event in db.events)
     assert db.history_rows[0]["detail"].startswith("DRY-RUN:")
     assert db.history_rows[0]["transmit_status"] == "dry-run"
     assert db.state_rows == []
@@ -324,7 +330,8 @@ async def test_marine_api_area_change_is_new_revision_without_rss_change(monkeyp
     assert len(db.history_rows) == 2
     assert db.history_rows[0]["revision_hash"] != db.history_rows[1]["revision_hash"]
     assert "Sydney Coast" in db.history_rows[1]["transmitted_text"]
-    assert "Cancellation of Marine Wind Warning" in db.history_rows[1]["transmitted_text"]
+    assert "BOM CANCELLED" in db.history_rows[1]["transmitted_text"]
+    assert "Marine Wind Warning for Batemans Coast" in db.history_rows[1]["transmitted_text"]
     assert "Batemans Coast" in db.history_rows[1]["transmitted_text"]
     assert tx.enqueued == []
 
@@ -342,7 +349,7 @@ async def test_existing_dry_run_revision_refreshes_prepared_wording(monkeypatch)
     await poller._process(item, rules, "Australia/Sydney", 0, dry_run=True)
 
     assert len(db.history_rows) == 1
-    assert db.history_rows[0]["transmitted_text"].startswith("Wednesday: warning")
+    assert "Wednesday: warning" in db.history_rows[0]["transmitted_text"]
 
 
 def test_verification_success_starts_persistent_five_minute_cooldown():
@@ -420,5 +427,18 @@ async def test_bom_source_note_fits_multipart_radio_budget():
     await poller._process(item, rules, "Australia/Sydney", 0, dry_run=False)
     parts = [entry["text"] for entry in tx.enqueued]
     assert len(parts) >= 2
-    assert parts[-1].endswith("; check bom.gov.au")
+    assert parts[-1].endswith("check bom.gov.au")
     assert all(len(part.encode("utf-8")) <= tx.message_budget for part in parts)
+
+
+@pytest.mark.asyncio
+async def test_bom_poll_does_not_queue_same_revision_twice_while_pending(monkeypatch):
+    db = _FakeDb()
+    tx = _FakeTx()
+    poller = BomPoller(db, tx)
+    rules = FilterRules(include_exact=[], include_suffix=["Warning"], exclude_exact=[])
+    item = _warning_item()
+    await poller._process(item.copy(), rules, "Australia/Sydney", 0, dry_run=False)
+    await poller._process(item.copy(), rules, "Australia/Sydney", 0, dry_run=False)
+    assert len(tx.enqueued) == 1
+    assert len(db.history_rows) == 1
