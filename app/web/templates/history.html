@@ -2,9 +2,13 @@
 {% block title %} &middot; History{% endblock %}
 {% block content %}
 <h2>History</h2>
-<p class="hint">Received revisions, selection decisions, dry-run previews, and local transmission outcomes across services. Unchanged polls do not add entries.</p>
+<p class="hint">Messages prepared for transmission across services, including queued, failed, and dry-run messages. Choose All records to see selection decisions without a prepared message. Unchanged polls do not add entries.</p>
 <div class="panel">
   <form method="get" action="/history" class="row" id="history-filter">
+    <div><label>Records</label><select name="records">
+      <option value="prepared" {% if records == 'prepared' %}selected{% endif %}>Prepared messages</option>
+      <option value="all" {% if records == 'all' %}selected{% endif %}>All records</option>
+    </select></div>
     <div><label>Source</label><select name="source" onchange="this.form.submit()">
       <option value="">All services</option>
       {% for item in sources %}<option value="{{ item.source_id }}" {% if source == item.source_id %}selected{% endif %}>{{ item.label }}</option>{% endfor %}

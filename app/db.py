@@ -569,8 +569,11 @@ class Database:
         transmit_status: Optional[str] = None, date_from: Optional[str] = None,
         date_to: Optional[str] = None, limit: int = 200,
         facet_key: str = "", facet_value: str = "",
+        prepared_only: bool = False,
     ) -> list[dict]:
         clauses, params = [], []
+        if prepared_only:
+            clauses.append("NULLIF(TRIM(transmitted_text), '') IS NOT NULL")
         if facet_key and facet_value:
             from .history import get_history_source
             spec = get_history_source(source or "")

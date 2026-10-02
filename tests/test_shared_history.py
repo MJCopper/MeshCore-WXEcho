@@ -68,3 +68,44 @@ def test_history_page_combines_bom_and_rfs_records():
     filtered = TestClient(app).get("/history?source=rfs&facet=Watch+and+Act")
     assert "Hill Fire" in filtered.text and "Flood Warning" not in filtered.text
     db.close()
+
+
+def test_history_defaults_to_prepared_messages_and_can_show_all_records():
+    db = Database(":memory:")
+    db.add_history("bom-excluded", "Excluded BOM", "Hunter", "filtered", "")
+    db.add_history("bom-queued", "Queued BOM", "Hunter", "sent", "BOM message",
+                   transmit_status="queued")
+    db.add_service_history("rfs", "rfs-failed", "Failed RFS", "Central Coast",
+                           transmitted_text="RFS message", transmit_status="failed")
+    db.add_service_history("traffic", "traffic-dry", "Dry Traffic", "Tamworth Regional",
+                           transmitted_text="Traffic message", transmit_status="dry-run")
+    db.add_service_history("traffic", "traffic-excluded", "Excluded Traffic", "Tamworth Regional",
+                           disposition="excluded-council")
+    app = FastAPI()
+    app.include_router(router)
+    app.state.db = db
+    app.state.tx = object()
+    client = TestClient(app)
+
+    default = client.get("/history")
+    assert default.status_code == 200
+    assert 'value="prepared" selected' in default.text
+    for title in ("Queued BOM", "Failed RFS", "Dry Traffic"):
+        assert title in default.text
+    for title in ("Excluded BOM", "Excluded Traffic"):
+        assert title not in default.text
+
+    partial = client.get("/partials/history")
+    assert "Queued BOM" in partial.text
+    assert "Excluded BOM" not in partial.text
+
+    all_records = client.get("/history?records=all&source=traffic")
+    assert 'value="all" selected' in all_records.text
+    assert "Dry Traffic" in all_records.text
+    assert "Excluded Traffic" in all_records.text
+    assert "Queued BOM" not in all_records.text
+
+    failed_only = client.get("/history?records=prepared&transmit_status=failed")
+    assert "Failed RFS" in failed_only.text
+    assert "Queued BOM" not in failed_only.text
+    db.close()

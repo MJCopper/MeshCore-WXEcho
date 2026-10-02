@@ -345,13 +345,14 @@ def _superseded_history_ids(rows):
 
 
 def _history_context(request, source="", disposition="", transmit_status="",
-                     date_from="", date_to="", facet=""):
+                     date_from="", date_to="", facet="", records="prepared"):
     db = _db(request)
     selected = get_history_source(source)
     source = source if selected else ""
     kwargs = dict(source=source or None, disposition=disposition or None,
                   transmit_status=transmit_status or None,
-                  date_from=date_from or None, date_to=date_to or None)
+                  date_from=date_from or None, date_to=date_to or None,
+                  prepared_only=records != "all")
     if selected and selected.facet_key and facet:
         kwargs.update(facet_key=selected.facet_key, facet_value=facet)
     rows = db.query_service_history(**kwargs)
@@ -361,6 +362,7 @@ def _history_context(request, source="", disposition="", transmit_status="",
                 source=source, sources=history_sources(), selected_source=selected,
                 disposition=disposition, transmit_status=transmit_status,
                 date_from=date_from, date_to=date_to, facet=facet,
+                records="all" if records == "all" else "prepared",
                 dispositions=["sent", "filtered", "update", "cancelled"],
                 transmit_statuses=["queued", "deferred", "success", "failed", "interrupted", "dry-run"])
 
@@ -368,17 +370,17 @@ def _history_context(request, source="", disposition="", transmit_status="",
 @router.get("/history", response_class=HTMLResponse)
 async def history(request: Request, source: str = "", disposition: str = "",
                   transmit_status: str = "", date_from: str = "", date_to: str = "",
-                  facet: str = ""):
+                  facet: str = "", records: str = "prepared"):
     return render(request, "history.html", **_history_context(
-        request, source, disposition, transmit_status, date_from, date_to, facet))
+        request, source, disposition, transmit_status, date_from, date_to, facet, records))
 
 
 @router.get("/partials/history", response_class=HTMLResponse)
 async def history_partial(request: Request, source: str = "", disposition: str = "",
                           transmit_status: str = "", date_from: str = "", date_to: str = "",
-                          facet: str = ""):
+                          facet: str = "", records: str = "prepared"):
     return render(request, "_history_rows.html", **_history_context(
-        request, source, disposition, transmit_status, date_from, date_to, facet))
+        request, source, disposition, transmit_status, date_from, date_to, facet, records))
 
 
 # ---- transmit log ------------------------------------------------------
@@ -885,4 +887,3 @@ def _split_lines(value: str) -> list[str]:
         if item:
             parts.append(item)
     return parts
-
