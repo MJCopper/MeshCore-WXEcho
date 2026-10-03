@@ -23,6 +23,8 @@ def _to_local(iso: str, tz_name: str):
         dt = datetime.fromisoformat(iso)
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        return None
     if tz_name:
         try:
             return dt.astimezone(ZoneInfo(tz_name))
@@ -214,58 +216,51 @@ def compact_topic(topic: str, source: str, action: str, max_bytes: int,
 
 def frame_notice(source: str, action: str, topic: str, sections: list,
                  source_note: str, max_bytes: int, notice_id: str) -> list[str]:
-    """Give every radio part source, action, topic and a shared multipart reference.
+    """Number parts first; identify the ordered notice only in its first part.
 
-    A section may override its action and topic with (action, topic, text), so
-    mixed marine warnings and cancellations remain clear after splitting.
+    Preserve labels when marine sections change action or hazard type.
     """
-    if not sections:
-        raise ValueError("notice has no content")
     clean = []
     for section in sections:
         section_action, section_topic, content = (section if isinstance(section, tuple)
-                                                   else (action, topic, section))
+                                                  else (action, topic, section))
         content = re.sub(r"^\d+/\d+\s+", "", content or "").strip()
         if content:
             clean.append((section_action, section_topic, content))
     if not clean:
         raise ValueError("notice has no content")
-    reference = hashlib.sha256(notice_id.encode("utf-8")).hexdigest()[:4].upper()
+    first_action, first_topic, _ = clean[0]
+    bodies = []
+    previous = (first_action, first_topic)
+    for part_action, part_topic, content in clean:
+        if (part_action, part_topic) != previous:
+            content = f"{part_action} {part_topic}" + _notice_joiner(content) + content
+        bodies.append(content)
+        previous = (part_action, part_topic)
     note = source_note.strip(" ;")
+    bodies[-1] = bodies[-1].rstrip(" .;") + "; " + note
+    reference = hashlib.sha256(notice_id.encode("utf-8")).hexdigest()[:4].upper()
     estimate = 1
     for _ in range(30):
-        marker = f" #{reference} {estimate}/{estimate}" if estimate > 1 else ""
-        room = min(max_bytes - _byte_len(f"{source} {part_action}{marker} {part_topic}: ")
-                   for part_action, part_topic, _ in clean)
-        chunks = [(part_action, part_topic, chunk)
-                  for part_action, part_topic, content in clean
-                  for chunk in _split_plain(content, room)]
-        if not chunks:
-            raise ValueError("notice has no content")
-        last_action, last_topic, last_content = chunks[-1]
-        last_header = f"{source} {last_action}{marker} {last_topic}"
-        last_joiner = _notice_joiner(last_content)
-        last_text = last_header + last_joiner + last_content
-        if _byte_len(last_text.rstrip(" .;") + "; " + note) <= max_bytes:
-            chunks[-1] = (last_action, last_topic,
-                          last_content.rstrip(" .;") + "; " + note)
-        else:
-            if _byte_len(last_header + ": " + note) > max_bytes:
-                raise ValueError("MeshCore message budget too small for source note")
-            chunks.append((last_action, last_topic, note))
-        total = len(chunks)
-        if total != estimate:
-            estimate = total
-            continue
         output = []
-        for index, (part_action, part_topic, content) in enumerate(chunks, 1):
-            marker = f" #{reference} {index}/{total}" if total > 1 else ""
-            header = f"{source} {part_action}{marker} {part_topic}"
-            message = header + _notice_joiner(content) + content
-            if _byte_len(message) > max_bytes:
+        for body in bodies:
+            remaining = " ".join(body.split())
+            while remaining:
+                index = len(output) + 1
+                marker = f"{index}/{estimate} " if estimate > 1 else ""
+                header = (f"{source} {first_action}" +
+                          (f" #{reference}" if estimate > 1 else "") + f" {first_topic}") if index == 1 else ""
+                joiner = _notice_joiner(remaining) if header else ""
+                prefix = marker + header + joiner
+                room = max_bytes - _byte_len(prefix)
+                chunk = _split_plain(remaining, room)[0]
+                output.append(prefix + chunk)
+                remaining = remaining[len(chunk):].lstrip()
+        if len(output) == estimate:
+            if any(_byte_len(part) > max_bytes for part in output):
                 raise ValueError("MeshCore notice part exceeds byte budget")
-            output.append(message)
-        return output
+            return output
+        estimate = len(output)
     raise ValueError("MeshCore notice part numbering did not converge")
 
 
@@ -278,7 +273,7 @@ def _notice_joiner(content: str) -> str:
 
 
 def marine_notice_sections(alert, tz_name: str, action: str = "NEW") -> list[tuple[str, str, str]]:
-    """Keep active and cancelled marine areas labelled in every part."""
+    """Label each active or cancelled marine section without repeating part headers."""
     out = []
     for section in getattr(alert, "warning_sections", ()) or ():
         onset = _to_local(section.onset, tz_name)
@@ -385,3 +380,12 @@ def fmt_local(iso: str, tz_name: str = "Australia/Sydney") -> str:
         return dt.strftime("%b %-d, %-I:%M %p")
     except ValueError:
         return dt.strftime("%b %d, %I:%M %p")
+
+
+def fmt_epoch(value, tz_name: str = "Australia/Sydney") -> str:
+    if value is None:
+        return ""
+    try:
+        return fmt_local(datetime.fromtimestamp(value, timezone.utc).isoformat(), tz_name)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""

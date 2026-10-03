@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import asdict
 import hashlib
 import json
 import logging
@@ -9,7 +11,7 @@ import re
 from datetime import datetime, timezone
 
 from .bom import BOMClient, BOMError
-from .bom_enricher import BOMWarningEnricher
+from .bom_enricher import BOMEnrichment, BOMWarningEnricher
 from .bom_area import match_councils
 from .config import (
     FINAL_VERIFICATION_MESSAGE,
@@ -50,6 +52,7 @@ class BomPoller:
         self._db = db
         self._tx = transmit_manager
         self.status = PollerStatus()
+        self._poll_lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
         self._wake_generation = 0
@@ -92,6 +95,7 @@ class BomPoller:
                 continue
             interval = polling_seconds(self._db.get_setting("bom_poll_minutes", 5), 5)
             self._wake.clear()
+            self.next_poll_at = datetime.fromtimestamp(time.time() + interval, timezone.utc).isoformat()
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -99,7 +103,15 @@ class BomPoller:
             except asyncio.CancelledError:
                 return
 
-    async def poll_once(self) -> None:
+    async def poll_once(self):
+        async with self._poll_lock:
+            started = time.monotonic()
+            try:
+                return await self._poll_once()
+            finally:
+                self.last_poll_duration = round(time.monotonic() - started, 3)
+
+    async def _poll_once(self) -> None:
         settings = self._db.all_settings()
         if not settings.get("bom_enabled", True):
             self.status.last_poll_result = "disabled"
@@ -109,7 +121,7 @@ class BomPoller:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             items, raw = await client.fetch_active(
-                regions, districts=settings.get("bom_districts", []))
+                regions)
         except BOMError as exc:
             self.status.last_poll_time = now
             self.status.last_poll_result = f"error: {exc}"
@@ -164,6 +176,7 @@ class BomPoller:
                 queued_warning |= bool(await self._process(item, rules, tz_name, channel, dry_run,
                                                            settings))
             except Exception as exc:
+                item["selection"] = "processing error"
                 logger.exception("error processing BOM warning")
                 self._db.add_error("poller", f"process error: {exc}")
         self._db.replace_bom_current(items, set(successful or ()) & {"NSW"}, now)
@@ -171,7 +184,7 @@ class BomPoller:
             self._queue_verification(channel, dry_run)
 
     async def _process(self, item, rules, tz_name, channel, dry_run,
-                       settings=None) -> None:
+                       settings=None, force=False) -> None:
         if item.get("region", "NSW") != "NSW":
             return False
         alert = Alert.from_bom(item)
@@ -179,12 +192,25 @@ class BomPoller:
             return False
         settings = settings or self._db.all_settings()
         enrichment = None
-        if alert.message_type != "Cancel" and alert.references and should_include(alert.event, rules):
+        if alert.message_type != "Cancel" and alert.references:
             enrichment = await self._enricher.enrich(alert.references[0])
             alert.specific_locations = enrichment.locations
             alert.warning_summary = enrichment.summary
             alert.warning_sections = (getattr(enrichment, "sections", ())
                                       if alert.event == "Marine Wind Warning" else ())
+            alert.effective = getattr(enrichment, "issued", "") or alert.effective
+            alert.expires = getattr(enrichment, "expires", "") or alert.expires
+        item["_enrichment"] = asdict(enrichment) if isinstance(enrichment, BOMEnrichment) else {}
+        item.update(effective=alert.effective, expires=alert.expires)
+        item["enrichment_status"] = (getattr(enrichment, "status", "") or
+                                      ("available" if enrichment and enrichment != BOMEnrichment() else "unavailable")) if alert.references and alert.message_type != "Cancel" else "not requested"
+        item["provider_areas"] = [{"type": kind, "code": code, "name": name}
+                                  for kind, code, name in getattr(enrichment, "geocodes", ())]
+        item.update(specific_locations=alert.specific_locations,
+                    warning_summary=alert.warning_summary,
+                    warning_sections=[{"phenomenon": s.phenomenon, "areas": s.areas,
+                                       "phase": s.phase, "onset": s.onset}
+                                      for s in alert.warning_sections])
         if not self._db.get_setting("bom_enabled", True):
             return False
         decision = decide(alert, rules, self._db.get_state)
@@ -192,13 +218,13 @@ class BomPoller:
         all_councils = bool(settings.get("bom_all_councils", True))
         include_unknown = bool(settings.get("bom_include_unknown_councils", True))
         polygons = tuple(getattr(enrichment, "polygons", ()) or ())
-        if polygons and not all_councils and self._council_index is None:
+        if polygons and self._council_index is None:
             boundaries = await TrafficClient().boundaries()
             self._council_index = await asyncio.to_thread(prepare_councils, boundaries)
         match = await asyncio.to_thread(
             match_councils, alert.area_desc,
             tuple(getattr(enrichment, "area_names", ()) or ()),
-            polygons, self._council_index)
+            polygons, self._council_index, tuple(getattr(enrichment, "lga_names", ()) or ()))
         matched_selected = bool({council_key(x) for x in match.councils} &
                                 {council_key(x) for x in selected})
         latest = self._db.latest_history(alert.alert_id)
@@ -215,22 +241,48 @@ class BomPoller:
                          previous_meta.get("include_unknown") is False)
         if (decision.disposition == "duplicate" and previous_meta and expanded):
             decision = Decision("update", True, "newly selected BOM council coverage")
-        if not all_councils and decision.transmit and decision.disposition != "cancelled":
+        eligible = should_include(alert.event, rules)
+        try:
+            expiry = datetime.fromisoformat(alert.expires) if alert.expires else None
+            expired = expiry is not None and expiry.tzinfo is not None and expiry <= datetime.now(timezone.utc)
+        except ValueError:
+            expiry = None
+            expired = False
+        districts = settings.get("bom_districts", [])
+        haystack = " ".join((alert.event, alert.area_desc, alert.headline, alert.detail,
+                             alert.specific_locations, alert.warning_summary)).casefold()
+        district_match = not districts or any(d.strip().casefold() in haystack
+                                              for d in districts if d.strip())
+        if not district_match and decision.disposition != "cancelled":
+            eligible = False
+            decision = Decision("filtered", False, "outside selected BOM districts")
+        if expired and alert.message_type != "Cancel":
+            eligible = False
+            decision = Decision("filtered", False, "BOM warning has expired")
+        if not all_councils and decision.disposition != "cancelled":
             if not selected:
+                eligible = False
                 decision.transmit = False
                 decision.disposition = "filtered"
                 decision.detail = "no BOM councils selected"
             elif match.status == "matched" and not matched_selected:
+                eligible = False
                 decision.transmit = False
                 decision.disposition = "filtered"
                 decision.detail = "outside selected BOM councils"
             elif match.status == "unknown" and not include_unknown:
+                eligible = False
                 decision.transmit = False
                 decision.disposition = "filtered"
                 decision.detail = "BOM council match unknown"
-        selection = ("included" if decision.transmit else "excluded")
+        if force and eligible and alert.message_type != "Cancel":
+            decision = Decision("update", True, "Operator requested resend of current warning")
+        selection = "included" if eligible or decision.disposition == "cancelled" else "excluded"
+        if alert.message_type == "Cancel" and decision.disposition == "filtered":
+            selection = "excluded"
         item.update(council_match=match.status, matched_councils=list(match.councils),
-                    match_method=match.method, selection=selection)
+                    match_method=match.method, match_reason=match.reason, selection=selection,
+                    selection_reason=decision.detail)
         area_detail = (f"; council match: {match.status}"
                        + (f" ({', '.join(match.councils)})" if match.councils else "")
                        + (f" via {match.method}" if match.method else ""))
@@ -254,21 +306,24 @@ class BomPoller:
                              "check bom.gov.au", budget, alert.alert_id)
         logged_text = " || ".join(parts)
 
-        coverage = json.dumps([all_councils, sorted(selected), include_unknown],
+        coverage = json.dumps([all_councils, sorted(selected), include_unknown,
+                               sorted(districts), rules.include_exact,
+                               rules.include_suffix, rules.exclude_exact],
                               separators=(",", ":"))
         coverage_hash = hashlib.sha256(coverage.encode()).hexdigest()[:8]
         revision_hash = f"{alert.revision_hash()}:{coverage_hash}"
         if permanently_unsendable(latest, revision_hash, logged_text):
             return False
-        if (decision.transmit and not dry_run and latest is not None
+        if (decision.transmit and latest is not None
                 and latest["revision_hash"] == revision_hash
-                and latest["transmit_status"] in ("queued", "success")):
+                and (latest["transmit_status"] == "queued" or
+                     (not force and not dry_run and latest["transmit_status"] == "success"))):
             return False
-        retry_existing = (decision.transmit and not dry_run and latest is not None
+        retry_existing = ((not force or (latest is not None and latest["transmit_status"] == "deferred")) and decision.transmit and not dry_run and latest is not None
                           and latest["revision_hash"] == revision_hash
                           and latest["transmitted_text"] == logged_text
                           and latest["transmit_status"] in ("failed", "interrupted", "deferred"))
-        if latest is None or latest["revision_hash"] != revision_hash or (
+        if (force and decision.transmit and not retry_existing) or latest is None or latest["revision_hash"] != revision_hash or (
                 decision.transmit and not dry_run and not retry_existing
                 and latest["transmit_status"] in ("failed", "interrupted", "deferred")):
             detail = decision.detail + area_detail
@@ -287,6 +342,9 @@ class BomPoller:
                 metadata={"region": "NSW", "council_match": match.status,
                           "matched_councils": list(match.councils),
                           "match_method": match.method, "selection": selection,
+                          "match_reason": match.reason, "enrichment_status": item["enrichment_status"],
+                          "source_url": alert.references[0] if alert.references else "",
+                          "provider_areas": item["provider_areas"],
                           "all_councils": all_councils,
                           "selected_councils": sorted(selected),
                           "include_unknown": include_unknown},
@@ -339,7 +397,34 @@ class BomPoller:
             self._db.add_event("ALARM", f"BROADCAST FAILED, will retry: {a.event} for {(a.area_desc or '')[:40]}")
             logger.error("broadcast FAILED on MeshCore: %s", t)
 
-        if not submit_notice(self._tx, [parts[i] for i in indices], _on_result, priority=1):
+        prepared_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        def valid_if():
+            current = self._db.all_settings()
+            latest_now = self._db.latest_history(alert.alert_id)
+            if not current.get("bom_enabled", True) or not latest_now or latest_now["revision_hash"] != revision_hash:
+                return False
+            if decision.disposition == "cancelled":
+                return True
+            if expiry is not None and expiry.tzinfo is not None and expiry <= datetime.now(timezone.utc):
+                return False
+            snapshots = self._db.bom_snapshot_regions(["NSW"])
+            if snapshots and snapshots[0]["fetched_at"] > prepared_at and not self._db.bom_current_item(alert.alert_id):
+                return False
+            if not should_include(alert.event, FilterRules.from_settings(current)):
+                return False
+            selected_districts = current.get("bom_districts", [])
+            if selected_districts and not any(d.strip().casefold() in haystack for d in selected_districts if d.strip()):
+                return False
+            if current.get("bom_all_councils", True):
+                return True
+            selected_now = {council_key(x) for x in current.get("bom_councils", [])}
+            return bool(selected_now and (
+                match.status == "unknown" and current.get("bom_include_unknown_councils", True)
+                or {council_key(x) for x in match.councils} & selected_now))
+
+        if not submit_notice(self._tx, [parts[i] for i in indices], _on_result, priority=1,
+                             valid_if=valid_if):
             status, reason = queue_refusal(parts)
             self._db.update_history_transmit_status(history_id, status, reason)
             if status == "failed":

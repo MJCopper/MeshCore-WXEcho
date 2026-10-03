@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -140,6 +141,14 @@ CREATE TABLE IF NOT EXISTS traffic_items (
 );
 CREATE INDEX IF NOT EXISTS idx_traffic_last_seen ON traffic_items(last_seen);
 
+CREATE TABLE IF NOT EXISTS traffic_feed_status (
+    feed TEXT PRIMARY KEY,
+    last_checked TEXT NOT NULL,
+    last_success TEXT NOT NULL DEFAULT '',
+    published TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS transmit_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     ts         TEXT NOT NULL,
@@ -220,14 +229,27 @@ class Database:
                 ("matched_councils", "TEXT NOT NULL DEFAULT '[]'"),
                 ("match_method", "TEXT NOT NULL DEFAULT ''"),
                 ("selection", "TEXT NOT NULL DEFAULT ''"),
+                ("specific_locations", "TEXT NOT NULL DEFAULT ''"),
+                ("warning_summary", "TEXT NOT NULL DEFAULT ''"),
+                ("warning_sections", "TEXT NOT NULL DEFAULT '[]'"),
+                ("match_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("selection_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("enrichment_status", "TEXT NOT NULL DEFAULT 'not requested'"),
+                ("provider_areas", "TEXT NOT NULL DEFAULT '[]'"),
+                ("raw_data", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 if name not in current_columns:
                     self._conn.execute(f"ALTER TABLE bom_current ADD COLUMN {name} {definition}")
             self._conn.execute("DELETE FROM bom_current WHERE region != 'NSW'")
             self._conn.execute("DELETE FROM bom_feed_snapshots WHERE region != 'NSW'")
             incident_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(rfs_incidents)")}
+            traffic_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(traffic_items)")}
+            if "normalized_data" not in traffic_columns:
+                self._conn.execute("ALTER TABLE traffic_items ADD COLUMN normalized_data TEXT NOT NULL DEFAULT '{}'")
             if "missing_polls" not in incident_columns:
                 self._conn.execute("ALTER TABLE rfs_incidents ADD COLUMN missing_polls INTEGER NOT NULL DEFAULT 0")
+            if "normalized_data" not in incident_columns:
+                self._conn.execute("ALTER TABLE rfs_incidents ADD COLUMN normalized_data TEXT NOT NULL DEFAULT '{}'")
             self._conn.execute(
                 "DELETE FROM alert_state WHERE alert_id IN "
                 "(SELECT alert_id FROM history WHERE transmit_status = 'dry-run')"
@@ -388,6 +410,20 @@ class Database:
                      json.dumps(item.get("matched_councils", [])),
                      item.get("match_method", ""), item.get("selection", "")),
                 )
+                self._conn.execute(
+                    "UPDATE bom_current SET specific_locations=?, warning_summary=?, warning_sections=? "
+                    "WHERE region=? AND alert_id=?",
+                    (item.get("specific_locations", ""), item.get("warning_summary", ""),
+                     json.dumps(item.get("warning_sections", [])), region, item["id"]),
+                )
+                self._conn.execute(
+                    "UPDATE bom_current SET match_reason=?, selection_reason=?, enrichment_status=?, provider_areas=? "
+                    "WHERE region=? AND alert_id=?",
+                    (item.get("match_reason", ""), item.get("selection_reason", ""),
+                     item.get("enrichment_status", "not requested"), json.dumps(item.get("provider_areas", [])), region, item["id"]),
+                )
+                self._conn.execute("UPDATE bom_current SET raw_data=? WHERE region=? AND alert_id=?",
+                                   (json.dumps(item), region, item["id"]))
             self._conn.commit()
 
     def bom_current_items(self, regions: list[str], limit: int = 500):
@@ -399,6 +435,12 @@ class Database:
                 f"SELECT * FROM bom_current WHERE region IN ({placeholders}) "
                 "ORDER BY region, issued DESC, headline LIMIT ?", (*regions, limit),
             ).fetchall()
+
+    def bom_current_item(self, alert_id: str):
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM bom_current WHERE region='NSW' AND alert_id=?", (alert_id,),
+            ).fetchone()
 
     def bom_snapshot_regions(self, regions: list[str]):
         if not regions:
@@ -681,7 +723,7 @@ class Database:
         with self._lock:
             return self._conn.execute("SELECT * FROM traffic_items WHERE item_id = ?", (item_id,)).fetchone()
 
-    def traffic_save_item(self, item, council: str, active: bool) -> None:
+    def traffic_save_item(self, item, council: str, active: bool, match=None) -> None:
         with self._lock:
             self._conn.execute(
                 """INSERT INTO traffic_items
@@ -695,6 +737,11 @@ class Database:
                 (item.item_id, item.feed, item.title, item.category, item.road, item.suburb,
                  council, item.revision, _now(), int(active)),
             )
+            data = asdict(item)
+            if match is not None:
+                data.update(match_method=match.method, match_reason=match.reason)
+            self._conn.execute("UPDATE traffic_items SET normalized_data=? WHERE item_id=?",
+                               (json.dumps(data), item.item_id))
             self._conn.commit()
 
     def traffic_mark_sent(self, item_id: str, revision: str) -> None:
@@ -719,10 +766,11 @@ class Database:
             self._conn.commit()
             return cur.rowcount
 
-    def traffic_missing_after_poll(self, seen_ids: set[str]) -> list[dict]:
+    def traffic_missing_after_poll(self, seen_ids: set[str], successful_feeds: set[str] | None = None) -> list[dict]:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM traffic_items").fetchall()
-            missing = [row for row in rows if row["item_id"] not in seen_ids]
+            missing = [row for row in rows if row["item_id"] not in seen_ids
+                       and (successful_feeds is None or row["feed"] in successful_feeds)]
             for row in missing:
                 self._conn.execute(
                     "UPDATE traffic_items SET missing_polls = missing_polls + 1, active = 0 WHERE item_id = ?",
@@ -737,6 +785,43 @@ class Database:
                 "SELECT * FROM traffic_items WHERE last_seen >= ? "
                 "ORDER BY active DESC, last_seen DESC, item_id LIMIT ?", (since, limit),
             ).fetchall()
+
+    def traffic_record_feed_status(self, successful, errors, published, checked):
+        with self._lock:
+            for feed in set(successful) | set(errors):
+                stamp = datetime.fromtimestamp(published[feed], timezone.utc).isoformat() if published.get(feed) is not None else ""
+                self._conn.execute(
+                    "INSERT INTO traffic_feed_status(feed,last_checked,last_success,published,error) VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(feed) DO UPDATE SET last_checked=excluded.last_checked, "
+                    "last_success=CASE WHEN excluded.last_success!='' THEN excluded.last_success ELSE last_success END, "
+                    "published=CASE WHEN excluded.published!='' THEN excluded.published ELSE published END, error=excluded.error",
+                    (feed, checked, checked if feed in successful else "", stamp, errors.get(feed, "")),
+                )
+            self._conn.commit()
+
+    def traffic_feed_status(self):
+        with self._lock:
+            return self._conn.execute("SELECT * FROM traffic_feed_status ORDER BY feed").fetchall()
+
+    def current_listing(self, source: str, page: int, page_size: int = 50):
+        """Paginate complete saved source listings with stable ordering."""
+        table, where, order = {
+            "bom": ("bom_current", "region='NSW'", "issued DESC, alert_id"),
+            "rfs": ("rfs_incidents", "missing_polls<2", "CASE level WHEN 'Emergency Warning' THEN 0 WHEN 'Watch and Act' THEN 1 ELSE 2 END, name, incident_id"),
+            "traffic": ("traffic_items", "1=1", "active DESC, last_seen DESC, item_id"),
+        }[source]
+        page_size = min(200, max(1, page_size))
+        with self._lock:
+            total = self._conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0]
+            pages = max(1, (total + page_size - 1) // page_size)
+            page = min(pages, max(1, page))
+            rows = self._conn.execute(
+                f"SELECT * FROM {table} WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+                (page_size, (page - 1) * page_size),
+            ).fetchall()
+        return rows, {"page": page, "pages": pages, "total": total,
+                      "first": (page-1)*page_size+1 if total else 0,
+                      "last": min(page*page_size, total)}
 
     # ---- NSW RFS incidents and history ------------------------------------
     def rfs_get_incident(self, incident_id: str):
@@ -762,6 +847,8 @@ class Database:
                  incident.location, incident.status, incident.kind, incident.updated,
                  incident.source_url, revision_hash, _now()),
             )
+            self._conn.execute("UPDATE rfs_incidents SET normalized_data=? WHERE incident_id=?",
+                               (json.dumps(asdict(incident)), incident.incident_id))
             self._conn.commit()
 
     def rfs_mark_sent(self, incident_id: str, revision_hash: str) -> None:
@@ -780,6 +867,8 @@ class Database:
             disposition=disposition, revision_hash=incident.revision,
             metadata={"level": incident.level, "status": incident.status,
                       "kind": incident.kind, "location": incident.location,
+                      "size": incident.size, "agency": incident.agency,
+                      "updated_raw": incident.updated, "published_raw": incident.published_raw,
                       "source_url": incident.source_url},
         )
 
@@ -822,7 +911,7 @@ class Database:
     def rfs_active_incidents(self, since: str, limit: int = 500):
         with self._lock:
             return self._conn.execute(
-                "SELECT * FROM rfs_incidents WHERE last_seen >= ? "
+                "SELECT * FROM rfs_incidents WHERE last_seen >= ? AND missing_polls < 2 "
                 "ORDER BY CASE level WHEN 'Emergency Warning' THEN 0 "
                 "WHEN 'Watch and Act' THEN 1 ELSE 2 END, name LIMIT ?",
                 (since, limit),

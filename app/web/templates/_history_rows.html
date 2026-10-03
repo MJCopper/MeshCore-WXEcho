@@ -29,6 +29,20 @@
     <div class="rec-area">{{ r.area }}{% if r.metadata.status %} · {{ r.metadata.status }}{% endif %}</div>
   </div>
   {% endif %}
+  {% if r.metadata.match_reason or r.metadata.enrichment_status %}
+  <div class="rec-areawrap"><div class="rec-lbl">Source and matching detail</div><div class="rec-area">
+    {% if r.metadata.match_reason %}{{ r.metadata.match_reason }}{% endif %}
+    {% if r.metadata.enrichment_status %} · Detail enrichment: {{ r.metadata.enrichment_status }}{% endif %}
+  </div></div>
+  {% endif %}
+  {% if r.metadata.size or r.metadata.agency or r.metadata.public_transport or r.metadata.periods %}
+  <div class="rec-areawrap"><div class="rec-lbl">Provider detail</div><div class="rec-area">
+    {% if r.metadata.size %}Reported size: {{ r.metadata.size }} · {% endif %}{% if r.metadata.agency %}Agency: {{ r.metadata.agency }}{% endif %}
+    {% if r.metadata.public_transport %}Public transport: {{ r.metadata.public_transport }}{% endif %}
+    {% for period in r.metadata.periods %}<p>Schedule: {{ period }}</p>{% endfor %}
+  </div></div>
+  {% endif %}
+  {% if r.metadata.source_url %}<div class="rec-area"><a href="{{ r.metadata.source_url }}" target="_blank" rel="noopener noreferrer">View provider information</a></div>{% endif %}
 </div>
 {% else %}
 <div class="rec"><span class="hint">No history yet.</span></div>

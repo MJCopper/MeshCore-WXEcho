@@ -65,7 +65,7 @@ async def test_rfs_filters_all_levels_by_selected_council_and_tracks_updates():
     poller = RFSPoller(db, tx, client)
     await poller.poll_once()
     assert len(tx.sent) == 1
-    assert "NSW RFS NEW Watch and Act" in tx.sent[0][0]
+    assert "NSW RFS NEW" in tx.sent[0][0] and "Watch and Act" in tx.sent[0][0]
     assert len(tx.verification) == 1
     tx.sent[0][1](True, "")
     assert db.rfs_get_incident("1")["last_sent_hash"] == incident().revision
@@ -182,3 +182,21 @@ def test_rfs_source_note_matches_other_services():
     parts = format_incident(incident(), 145)
     assert parts[-1].endswith("; check rfs.nsw.gov.au")
     assert all(len(part.encode("utf-8")) <= 145 for part in parts)
+
+
+@pytest.mark.parametrize("name,location,expected", [
+    ("WERRIS CREEK RD, QUIPOLLY", "WERRIS CREEK RD, QUIPOLLY 2343", "WERRIS CREEK RD, QUIPOLLY 2343"),
+    ("WERRIS CREEK RD, QUIPOLLY 2343", "WERRIS CREEK RD, QUIPOLLY", "WERRIS CREEK RD, QUIPOLLY 2343"),
+    ("WERRIS CREEK RD, QUIPOLLY", "werris creek rd, quipolly", "werris creek rd, quipolly"),
+])
+def test_rfs_location_is_present_once_with_fuller_source_detail(name, location, expected):
+    from dataclasses import replace
+    item = replace(incident(), name=name, location=location, level="Advice",
+                   council="Liverpool Plains", kind="Grass Fire", status="Being controlled")
+    parts = format_incident(item, 126)
+    text = " ".join(parts)
+    assert text.casefold().count("werris creek rd") == 1
+    assert expected in text
+    assert "Grass Fire" in text and "Being controlled" in text
+    assert text.count("Advice") == 1
+    assert all(len(part.encode()) <= 126 for part in parts)

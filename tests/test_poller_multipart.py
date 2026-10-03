@@ -1,8 +1,11 @@
 import pytest
+from datetime import datetime, timedelta, timezone
 
 from app.config import BURST_GAP_SECONDS, FINAL_VERIFICATION_MESSAGE, MULTIPART_GAP_SECONDS
 from app.filters import FilterRules
 from app.poller import BomPoller
+
+TEST_EXPIRY = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0).isoformat()
 
 
 class _FakeDb:
@@ -109,7 +112,7 @@ def _warning_item(alert_id: str = "abc"):
         "headline": "warning",
         "area_desc": "Illawarra",
         "effective": "2026-09-28T08:00:00+00:00",
-        "expires": "2026-09-28T10:00:00+00:00",
+        "expires": TEST_EXPIRY,
         "message_type": "Alert",
     }
 
@@ -126,8 +129,9 @@ async def test_poller_queues_parts_then_final_verification_with_expected_delays(
     await poller._process(_warning_item(), rules, "Australia/Sydney", 0, dry_run=False)
 
     assert len(tx.enqueued) == 2
-    assert all("BOM NEW" in m["text"] and "Severe Thunderstorm Warning" in m["text"]
-               for m in tx.enqueued)
+    assert "BOM NEW" in tx.enqueued[0]["text"]
+    assert "Severe Thunderstorm Warning" in tx.enqueued[0]["text"]
+    assert "BOM NEW" not in tx.enqueued[1]["text"]
     assert "1/2" in tx.enqueued[0]["text"] and "first" in tx.enqueued[0]["text"]
     assert "2/2" in tx.enqueued[1]["text"] and tx.enqueued[1]["text"].endswith("check bom.gov.au")
     assert tx.enqueued[0]["delay_after"] == MULTIPART_GAP_SECONDS
@@ -207,7 +211,7 @@ async def test_poller_does_not_record_state_when_any_multipart_part_fails(monkey
     assert "broadcast failed: link down" in db.history_rows[0]["detail"]
     assert poller.status.last_broadcast_failure is not None
     assert "NOT SENT on MeshCore" in db.errors[-1][1]
-    assert "1/2 Severe Thunderstorm Warning: first" in db.errors[-1][1]
+    assert "1/2 BOM NEW" in db.errors[-1][1]
 
 
 @pytest.mark.asyncio
@@ -223,9 +227,9 @@ async def test_poller_dry_run_logs_history_and_events_with_final_verification(mo
 
     assert tx.enqueued == []
     assert len(db.events) == 2
-    assert db.events[0][1].startswith("[DRY-RUN] would send: BOM NEW")
-    assert "1/2 Severe Thunderstorm Warning: first" in db.events[0][1]
-    assert "2/2 Severe Thunderstorm Warning: second" in db.events[1][1]
+    assert db.events[0][1].startswith("[DRY-RUN] would send: 1/2 BOM NEW")
+    assert "1/2 BOM NEW" in db.events[0][1]
+    assert "2/2 second" in db.events[1][1]
     assert db.events[1][1].endswith("check bom.gov.au")
     assert len(db.history_rows) == 1
     assert db.history_rows[0]["transmitted_text"] == " || ".join(
@@ -330,7 +334,7 @@ async def test_marine_api_area_change_is_new_revision_without_rss_change(monkeyp
     assert len(db.history_rows) == 2
     assert db.history_rows[0]["revision_hash"] != db.history_rows[1]["revision_hash"]
     assert "Sydney Coast" in db.history_rows[1]["transmitted_text"]
-    assert "BOM CANCELLED" in db.history_rows[1]["transmitted_text"]
+    assert "CANCELLED Marine Wind Warning" in db.history_rows[1]["transmitted_text"]
     assert "Marine Wind Warning for Batemans Coast" in db.history_rows[1]["transmitted_text"]
     assert "Batemans Coast" in db.history_rows[1]["transmitted_text"]
     assert tx.enqueued == []

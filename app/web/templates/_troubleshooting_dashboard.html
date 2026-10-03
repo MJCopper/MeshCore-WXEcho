@@ -1,0 +1,61 @@
+<div class="panel">
+  <h3>Service diagnostics</h3>
+  <p class="hint">Current record counts and lifetime History totals are separate. Times use your display timezone. A successful fetch does not guarantee fresh provider data.</p>
+  <div id="diagnostic-summary">Loading diagnostics…</div>
+  <div id="service-diagnostics"></div>
+  <button class="secondary" onclick="pollSource('all')">Poll all enabled services now</button>
+</div>
+<div class="panel">
+  <h3>Re-process or resend current notices</h3>
+  <p>Re-process applies current filters and retains duplicate suppression. Resend bypasses delivery deduplication for eligible notices. Both retain service, council/product, expiry and dry-run controls. Notices already queued are skipped.</p>
+  <p class="hint">Uses stored provider inputs; run Poll now first if you need the latest notices. Resend preview lists all eligible notices. Re-process may leave already delivered notices unchanged.</p>
+  <label>Service <select id="replay-source" onchange="invalidatePreview()"><option value="all">All services</option><option value="bom">BOM</option><option value="rfs">NSW RFS</option><option value="traffic">Live Traffic NSW</option></select></label>
+  <label>Action <select id="replay-mode" onchange="invalidatePreview()"><option value="reprocess">Re-process current notices</option><option value="resend">Resend eligible current notices</option></select></label>
+  <button onclick="previewReplay()">Preview action</button>
+  <div id="replay-preview"></div>
+  <button id="start-replay" style="display:none" onclick="startReplay()">Start reviewed action</button>
+  <div id="replay-job" aria-live="polite"></div>
+  <button class="secondary" onclick="cancelJob()">Cancel remaining work</button>
+</div>
+<div class="panel">
+  <h3>MeshCore and delivery</h3>
+  <div id="delivery-diagnostics"></div>
+  <p class="hint">Confirmed means the local radio confirmed transmission; reception by another node is not established. Queue capacity defers complete notices without truncation.</p>
+</div>
+<div class="panel">
+  <h3>Application and database</h3>
+  <div id="application-diagnostics"></div>
+  <a href="/troubleshoot/bundle" class="button">Download redacted diagnostic bundle</a>
+</div>
+<div class="panel">
+  <h3>Live logs — application, stdout and stderr</h3>
+  <p class="hint">Recent captured logs survive restart. The window retains up to 1,000 records; disk capture rotates at 1 MiB with two backups. Output before capture starts, subprocess output and native writes require <code>docker compose logs</code>. Known credential fields are redacted.</p>
+  <label>Service <select id="log-service" onchange="resetLogs()"><option value="">All</option><option value="wx_echo.poller">BOM</option><option value="wx_echo.rfs">RFS</option><option value="wx_echo.traffic">Traffic</option><option value="wx_echo.tx">MeshCore</option><option value="httpx">HTTP feeds</option><option value="stdout">Stdout</option><option value="stderr">Stderr</option></select></label>
+  <label>Level <select id="log-level" onchange="resetLogs()"><option value="">All</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option></select></label>
+  <label>Search <input id="log-search" type="search" oninput="resetLogs()"></label>
+  <button class="secondary" id="log-pause" onclick="toggleLogs()">Pause</button>
+  <a id="log-download" href="/troubleshoot/logs/download">Download filtered logs</a>
+  <div id="log-status" aria-live="polite"></div>
+  <pre id="live-logs" style="white-space:pre-wrap;word-break:break-word;max-height:450px;overflow:auto;background:var(--bg);padding:12px"></pre>
+</div>
+<script>
+let previewToken=null, logCursor=0, logPaused=false, logLines=[], logsBusy=false, logGeneration=0;
+function el(id){return document.getElementById(id)}
+function show(id,value){el(id).textContent=value}
+function local(value){if(!value)return 'Not yet';const d=new Date(value);return isNaN(d)?value:d.toLocaleString(undefined,{timeZone:{{ (s.get('display_timezone') or 'Australia/Sydney')|tojson }}})}
+async function api(path,body){const response=await fetch('/troubleshoot/'+path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});let result;try{result=await response.json()}catch{throw Error('Request failed: '+response.status)}if(!response.ok)throw Error(result.detail||'Request failed');return result}
+function appendText(container,tag,text){const node=document.createElement(tag);node.textContent=text;container.appendChild(node);return node}
+async function refreshDiagnostics(){try{const d=await api('status');show('diagnostic-summary',(d.dry_run?'DRY RUN — automatic delivery is simulated':'LIVE — eligible notices may transmit')+' · Updated '+new Date().toLocaleTimeString());const target=el('service-diagnostics');target.replaceChildren();for(const s of d.services){const box=appendText(target,'section','');appendText(box,'h4',s.source.toUpperCase()+' — '+(s.enabled?'Enabled':'Disabled'));appendText(box,'p','Last attempt: '+local(s.last_attempt)+' · Last successful collection: '+local(s.last_success)+' · Next scheduled poll: '+local(s.next_poll));appendText(box,'p','Interval: '+s.interval_seconds/60+' min · Last poll duration: '+(s.poll_duration_seconds??'unknown')+' seconds · Current records: '+s.collected+' · '+s.result+' · '+s.freshness);appendText(box,'p','Current notices: last recorded decisions and delivery '+JSON.stringify(s.last_decisions));appendText(box,'p','Lifetime History counts: '+JSON.stringify(s.history_counts));if(s.uncertain)appendText(box,'p','Geographic uncertainty/fallback: '+s.uncertain+' records');if(s.source==='bom')appendText(box,'p','Enrichment: '+JSON.stringify(s.enrichment));for(const x of s.exclusions)appendText(box,'p',x.count+' excluded: '+x.detail);const b=appendText(box,'button','Poll '+s.source.toUpperCase()+' now');b.className='secondary';b.onclick=()=>pollSource(s.source);}
+if(d.traffic_feeds.length){appendText(target,'h4','Traffic feed health');for(const f of d.traffic_feeds)appendText(target,'p',f.feed+' · '+(f.requested?'Requested':'Not requested with current settings')+' · Checked '+local(f.last_checked)+' · Success '+local(f.last_success)+' · Published '+local(f.published)+' · '+(f.error||'No recorded error')+' · '+f.freshness);}
+show('delivery-diagnostics',JSON.stringify(d.queue,null,2)+'\nRadios: '+JSON.stringify(d.radios,null,2)+'\nLast confirmed send: '+JSON.stringify(d.last_confirmed));el('delivery-diagnostics').style.whiteSpace='pre-wrap';show('application-diagnostics','Version '+d.version+' · Uptime '+d.uptime_seconds+' seconds · Starts '+d.restart_count+' · Previous start '+local(d.previous_start)+'\nDatabase: '+d.database.path+' · '+d.database.bytes+' bytes · Write probe '+(d.database.writable?'passed':'failed')+' · SQLite '+d.database.sqlite_version+'\nMigrations: '+JSON.stringify(d.database.migrations)+'\nBoundaries: '+d.boundaries+'\nRecent errors: '+JSON.stringify(d.recent_errors));el('application-diagnostics').style.whiteSpace='pre-wrap';}catch(e){show('diagnostic-summary',e.message)}}
+function invalidatePreview(){previewToken=null;el('start-replay').style.display='none';show('replay-preview','Create a new preview for this selection')}
+async function previewReplay(){previewToken=null;el('start-replay').style.display='none';show('replay-preview','Preparing preview…');try{const p=await api('preview',{source:el('replay-source').value,mode:el('replay-mode').value});const target=el('replay-preview');target.replaceChildren();appendText(target,'p',p.mode+' '+p.source+' · '+p.notices+' eligible notices · '+p.parts+' estimated message parts · '+(p.dry_run?'DRY RUN':'LIVE'));for(const x of p.exclusions)appendText(target,'p',x.source+': '+x.count+' excluded — '+x.reason);for(const e of p.errors)appendText(target,'p','Cannot proceed: '+e);for(const item of p.details){const detail=appendText(target,'details','');appendText(detail,'summary',item.source.toUpperCase()+': '+item.title+' ('+item.parts+' parts)');const text=appendText(detail,'pre',item.text.split(' || ').join('\n'));text.style.whiteSpace='pre-wrap';}if(!p.errors.length){previewToken=p.token;el('start-replay').textContent=p.dry_run?'Start dry-run action':p.mode==='resend'?'Resend these eligible notices':'Re-process these current notices';el('start-replay').style.display='inline-block';}}catch(e){show('replay-preview',e.message)}}
+async function startReplay(){if(!previewToken)return;try{await api('replay',{token:previewToken});previewToken=null;el('start-replay').style.display='none';await refreshJob()}catch(e){show('replay-job',e.message)}}
+async function pollSource(source){try{await api('poll/'+source,{});await refreshJob()}catch(e){show('replay-job',e.message)}}
+async function cancelJob(){try{await api('cancel',{});await refreshJob()}catch(e){show('replay-job',e.message)}}
+async function refreshJob(){try{const j=await api('job');show('replay-job',j.status==='idle'?'No troubleshooting job yet':j.mode+' '+j.source+': '+j.status+' · '+j.processed+'/'+j.total+' processed · '+JSON.stringify(j.results)+(j.cancel_requested?' · Cancellation requested':'')+(j.error?' · '+j.error:''));}catch(e){show('replay-job',e.message)}}
+function resetLogs(){logGeneration++;logCursor=0;logLines=[];show('live-logs','')}
+function toggleLogs(){logPaused=!logPaused;el('log-pause').textContent=logPaused?'Resume':'Pause'}
+async function refreshLogs(){if(logPaused||logsBusy)return;logsBusy=true;const generation=logGeneration;const params=new URLSearchParams({after:logCursor,service:el('log-service').value,level:el('log-level').value,search:el('log-search').value});el('log-download').href='/troubleshoot/logs/download?'+params.toString();try{const data=await api('logs?'+params);if(generation!==logGeneration)return;logCursor=data.cursor;logLines.push(...data.rows.map(r=>local(r.ts)+' '+r.level+' '+r.service+' '+r.message));logLines=logLines.slice(-1000);const box=el('live-logs');const follow=box.scrollTop+box.clientHeight>=box.scrollHeight-30;box.textContent=logLines.join('\n');if(follow)box.scrollTop=box.scrollHeight;show('log-status',data.truncated?'Earlier records have rolled out of the bounded buffer':'Live capture active');}catch(e){show('log-status',e.message)}finally{logsBusy=false}}
+refreshDiagnostics();refreshJob();refreshLogs();setInterval(()=>{if(!document.hidden){refreshJob();refreshLogs()}},2000);setInterval(()=>{if(!document.hidden)refreshDiagnostics()},10000);
+</script>

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -35,7 +36,7 @@ class Alert:
             expires=item.get("expires") or item.get("ends") or "",
             message_type=(item.get("message_type") or "Alert").strip(),
             ends=item.get("ends") or item.get("expires") or "",
-            onset=item.get("onset") or item.get("effective") or "",
+            onset=item.get("onset") or "",
             detail=(item.get("detail") or "").strip(),
             references=item.get("references", []) or [],
             raw=item.get("raw", item),
@@ -43,10 +44,13 @@ class Alert:
 
     def content_hash(self) -> str:
         """Hash of the fields that determine whether a rebroadcast is warranted."""
-        basis = f"{self.event}|{self.headline}|{self.area_desc}|{self.expires}|{self.detail}|{self.warning_sections}"
+        basis = json.dumps((self.message_type, self.event, self.headline, self.area_desc,
+                            self.expires, self.ends, self.onset, self.detail,
+                            self.specific_locations, self.warning_summary,
+                            repr(self.warning_sections)), ensure_ascii=False)
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
     def revision_hash(self) -> str:
         """Identify a received warning revision, including its issue time."""
-        basis = f"{self.message_type}|{self.event}|{self.headline}|{self.area_desc}|{self.effective}|{self.expires}|{self.detail}|{self.warning_sections}"
+        basis = f"{self.effective}|{self.content_hash()}"
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]

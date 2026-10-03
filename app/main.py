@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,6 +12,9 @@ from fastapi import FastAPI
 from .config import load_bootstrap
 from .db import Database
 from .logging_setup import setup_logging
+from .diagnostic_logs import ProcessLogs
+from .troubleshooting import Troubleshooting, utc
+from .web.troubleshooting_routes import router as troubleshooting_router
 from .poller import BomPoller
 from .rfs.poller import RFSPoller
 from .rfs.web import router as rfs_router
@@ -37,6 +42,8 @@ async def _startup_radio(tx: TransmitManager) -> None:
 async def lifespan(app: FastAPI):
     cfg = load_bootstrap()
     setup_logging()
+    process_logs = ProcessLogs(Path(cfg.db_path).parent / "wxecho-process.jsonl" if cfg.db_path != ":memory:" else None)
+    process_logs.install()
     logger.info("starting wx-echo (db=%s)", cfg.db_path)
 
     db = Database(cfg.db_path)
@@ -45,12 +52,20 @@ async def lifespan(app: FastAPI):
     rfs_poller = RFSPoller(db, tx)
     traffic_poller = TrafficPoller(db, tx)
 
+    app.state.process_logs = process_logs
+    app.state.started_epoch = time.time()
+    app.state.started_at = utc()
+    db.set_setting("diagnostic_previous_start", db.get_setting("diagnostic_last_start", ""))
+    db.set_setting("diagnostic_last_start", app.state.started_at)
+    db.set_setting("diagnostic_restart_count", int(db.get_setting("diagnostic_restart_count", 0)) + 1)
     app.state.cfg = cfg
     app.state.db = db
     app.state.tx = tx
     app.state.poller = poller
     app.state.rfs_poller = rfs_poller
     app.state.traffic_poller = traffic_poller
+
+    app.state.troubleshooting = Troubleshooting(app)
 
     # Liveness watchdog: force a restart if the event loop ever wedges.
     liveness = Liveness(stall_seconds=90.0)
@@ -73,11 +88,13 @@ async def lifespan(app: FastAPI):
         beat_task.cancel()
         if not startup_task.done():
             startup_task.cancel()
+        await app.state.troubleshooting.close()
         await traffic_poller.stop()
         await rfs_poller.stop()
         await poller.stop()
         await tx.stop()
         db.close()
+        process_logs.close()
 
 
 def create_app() -> FastAPI:
@@ -85,6 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(router)
     app.include_router(rfs_router)
     app.include_router(traffic_router)
+    app.include_router(troubleshooting_router)
     return app
 
 

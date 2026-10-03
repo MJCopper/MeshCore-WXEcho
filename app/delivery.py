@@ -6,12 +6,14 @@ import json
 from .config import BURST_GAP_SECONDS, MULTIPART_GAP_SECONDS, QUEUE_MAX
 
 
-def submit_notice(tx, parts: list[str], on_result, priority: int = 3) -> bool:
+def submit_notice(tx, parts: list[str], on_result, priority: int = 3, valid_if=None) -> bool:
     """Queue an entire notice in order. A full live queue defers every part."""
     entries = [(part, MULTIPART_GAP_SECONDS if index < len(parts) - 1 else BURST_GAP_SECONDS)
                for index, part in enumerate(parts)]
     batch = getattr(tx, "enqueue_notice", None)
     if batch is not None:
+        if getattr(tx, "supports_notice_guards", False):
+            return batch(entries, on_result=on_result, priority=priority, valid_if=valid_if)
         return batch(entries, on_result=on_result, priority=priority)
     # Older lightweight transmitter doubles do not expose batch admission.
     if len(parts) > QUEUE_MAX or getattr(tx, "queue_depth", 0) + len(parts) > QUEUE_MAX:
@@ -45,14 +47,10 @@ def remaining_parts(row, text: str, parts: list[str]) -> list[int]:
 
 
 def queue_refusal(parts: list[str]) -> tuple[str, str]:
-    if len(parts) > QUEUE_MAX:
-        return "failed", f"Notice has {len(parts)} parts; queue limit is {QUEUE_MAX}"
-    return "deferred", "Waiting for space in the MeshCore send queue"
+    return "deferred", "Waiting for notice or byte capacity in the MeshCore send queue"
 
 
 def permanently_unsendable(row, revision: str, text: str) -> bool:
-    """Do not re-log an oversized unchanged notice at every poll."""
-    return bool(row is not None and row["revision_hash"] == revision
-                and row["transmitted_text"] == text
-                and row["transmit_status"] == "failed"
-                and row["detail"].startswith("Notice has "))
+    """Legacy oversized failures are eligible for streaming retry."""
+    # Previously oversized notices can now stream; do not strand old failed rows.
+    return False

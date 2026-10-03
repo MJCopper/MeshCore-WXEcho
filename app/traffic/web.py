@@ -2,24 +2,49 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Request, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..rfs.councils import COUNCILS
 from ..web.routes import render
 from .feed import TYPES
+from .schedule import ClosurePeriod, window_state
+from ..presentation import freshness
+import time
 
 router = APIRouter()
 
 
 @router.get("/traffic", response_class=HTMLResponse)
-async def traffic_page(request: Request):
+async def traffic_page(request: Request, page: int = Query(1, ge=1)):
     db = request.app.state.db
     poller = request.app.state.traffic_poller
-    since = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(timespec="seconds")
-    return render(request, "traffic.html", incidents=db.traffic_recent_items(since),
-                  feed_status=poller.last_result, last_poll=poller.last_poll)
+    rows, pagination = db.current_listing("traffic", page)
+    incidents = [dict(row) | {"data": json.loads(row["normalized_data"])}
+                 for row in rows]
+    s = db.all_settings()
+    for item in incidents:
+        data = item["data"]
+        item["schedule"] = [ClosurePeriod(**p).describe() for p in data.get("periods", [])]
+        item["freshness"] = freshness(item["last_seen"], s.get("traffic_poll_minutes", 10), s.get("traffic_enabled", False))
+        item["current_now"] = bool(item["active"] and not data.get("ended") and
+                                    (data.get("start") is None or data["start"] <= time.time()) and
+                                    (data.get("end") is None or data["end"] > time.time()))
+        item["closure_state"] = (window_state(tuple(ClosurePeriod(**p) for p in data.get("periods", [])), time.time())[1]
+                                 if item["current_now"] else "Notice is not currently active; closure status is unconfirmed")
+    feeds = []
+    saved_feeds = {row["feed"]: dict(row) for row in db.traffic_feed_status()}
+    for name in TYPES:
+        record = saved_feeds.get(name, {"feed": name, "last_success": "", "published": "", "error": ""})
+        requested = name in s.get("traffic_types", []) and not (name == "fire" and s.get("rfs_enabled"))
+        record["freshness"] = (freshness(record["last_success"], s.get("traffic_poll_minutes", 10), s.get("traffic_enabled", False))
+                               if requested else "Not requested with current settings")
+        feeds.append(record)
+    return render(request, "traffic.html", incidents=incidents,
+                  feed_status=poller.last_result, last_poll=poller.last_poll,
+                  pagination=pagination, feeds=feeds)
 
 
 @router.get("/settings/traffic", response_class=HTMLResponse)

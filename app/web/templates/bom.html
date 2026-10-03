@@ -7,20 +7,30 @@
   <p><b>Monitoring:</b> {{ 'enabled' if bom_enabled else 'disabled' }}</p>
   <p><b>Feed:</b> {{ bom_status }}{% if bom_last_poll %} · Last checked {{ bom_last_poll|localtime(tz) }}{% endif %}</p>
   <p class="hint">NSW feed{% if 'NSW' in snapshots %} · Last fetched {{ snapshots['NSW']|localtime(tz) }}{% else %} · Not fetched yet{% endif %}</p>
+  <p class="hint">{{ snapshot_freshness }}</p>
 </div>
 <p><a href="/settings/bom">BOM settings</a> · <a href="/history?source=bom">BOM history</a></p>
 <div class="panel" style="margin-top:18px;">
   <h3>{{ "Current items in the latest successful NSW feed" if bom_enabled else "Last saved feed items (monitoring disabled)" }}</h3>
   {% if items %}
+  {% include "_current_pagination.html" %}
   <table><thead><tr><th>Warning</th><th>Area</th><th>Council match</th><th>Issued</th><th>Feed status</th></tr></thead><tbody>
   {% for item in items %}<tr>
     <td>{% if item.source_url %}<a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">{{ item.event }}</a>{% else %}{{ item.event }}{% endif %}<br><span class="hint">{{ item.headline }}</span></td>
-    <td>{{ item.area or 'Not specified' }}</td>
-    <td>{{ item.council_match or 'unknown' }}{% if item.matched_councils and item.matched_councils %}<br><span class="hint">{{ item.matched_councils|join(", ") }}</span>{% endif %}{% if item.selection %}<br><span class="hint">{{ item.selection }}</span>{% endif %}</td>
+    <td>{{ item.area or 'Not specified' }}{% if item.specific_locations %}<br><span class="hint">{{ item.specific_locations }}</span>{% endif %}
+      {% for section in item.warning_sections %}<p class="hint">{{ 'CANCELLED' if section.phase == 'CAN' else section.phenomenon }}{% if section.onset %} · {{ section.onset|localtime(tz) }}{% endif %}: {{ section.areas }}</p>{% endfor %}
+      {% if item.warning_summary %}<p class="hint">{{ item.warning_summary }}</p>{% endif %}
+      {% if item.provider_areas %}<details><summary>Provider coverage</summary>{% for area in item.provider_areas %}<p class="hint">{{ area.label }}: {{ area.name }}</p>{% endfor %}</details>{% endif %}</td>
+    <td>{{ item.council_match or 'unknown' }}{% if item.matched_councils %}<br><span class="hint">{{ item.matched_councils|join(", ") }}</span>{% endif %}
+      {% if item.match_method %}<br>{{ item.match_method }}{% endif %}
+      {% if item.match_reason %}<p class="hint">{{ item.match_reason }}</p>{% endif %}
+      {% if item.selection %}<br>{{ item.selection }}{% endif %}{% if item.selection_reason %}<br><span class="hint">{{ item.selection_reason }}</span>{% endif %}</td>
     <td>{% if item.issued %}{{ item.issued|localtime(tz) }}{% else %}Not supplied{% endif %}</td>
-    <td>{{ 'Cancellation' if item.message_type == 'Cancel' else 'Warning' }}{% if item.expires %}<br><span class="hint">Expires {{ item.expires|localtime(tz) }}</span>{% endif %}</td>
+    <td>{{ 'Cancellation' if item.message_type == 'Cancel' else 'Warning' }}{% if item.expires %}<br><span class="hint">Expires {{ item.expires|localtime(tz) }}</span>{% endif %}
+      <br><span class="hint">Detail enrichment: {{ item.enrichment_status }}{% if item.enrichment_status == 'unavailable' %} — using RSS detail; council footprint may be unknown{% endif %}</span></td>
   </tr>{% endfor %}
   </tbody></table>
+  {% include "_current_pagination.html" %}
   {% else %}<p class="hint">No NSW feed items are stored. The feed may currently have no warnings; check the last-fetched time above.</p>{% endif %}
 </div>
 {% endblock %}

@@ -3,26 +3,31 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Request, Query
+import json
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..web.routes import render
 from .councils import COUNCILS
 from .feed import LEVELS
+from ..presentation import freshness
 
 router = APIRouter()
 
 
 @router.get("/rfs", response_class=HTMLResponse)
-async def rfs_page(request: Request):
+async def rfs_page(request: Request, page: int = Query(1, ge=1)):
     db = request.app.state.db
     s = db.all_settings()
     poller = request.app.state.rfs_poller
-    since = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(timespec="seconds")
+    rows, pagination = db.current_listing("rfs", page)
+    last_success = db.get_setting("rfs_last_successful_poll", getattr(poller, "last_successful_poll", ""))
     return render(request, "rfs.html", s=s, councils=COUNCILS, levels=LEVELS,
                   selected_councils=set(s.get("rfs_councils", [])),
                   selected_levels=set(s.get("rfs_levels", [])),
-                  incidents=db.rfs_active_incidents(since),
+                  incidents=[dict(row) | {"data": json.loads(row["normalized_data"])} for row in rows],
+                  pagination=pagination, last_success=last_success,
+                  snapshot_freshness=freshness(last_success, s.get("rfs_poll_minutes", 10), s.get("rfs_enabled", False)),
                   rfs_status=poller.last_result, rfs_last_poll=poller.last_poll)
 
 

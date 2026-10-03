@@ -51,12 +51,17 @@ def parse_rss(raw: str, source_url: str = "", districts: list[str] | None = None
         root = ElementTree.fromstring(raw)
     except ElementTree.ParseError as exc:
         raise BOMError("BOM returned invalid RSS XML") from exc
+    if root.tag != "rss" or root.find("channel") is None:
+        raise BOMError("BOM returned a document without an RSS channel")
 
     alerts = []
     for item in root.findall("./channel/item"):
         title = _text(item, "title")
-        link = urljoin(source_url or BOM_BASE_URL, _text(item, "link"))
+        raw_link = _text(item, "link")
+        link = urljoin(source_url or BOM_BASE_URL, raw_link) if raw_link else ""
         guid = _text(item, "guid") or link
+        if not title or not guid:
+            raise BOMError("BOM RSS item is missing its title or identifier")
         event, area = _split_title(title)
         message_type = "Cancel" if event.lower().startswith("cancellation of ") else "Alert"
         if message_type == "Cancel":
@@ -76,7 +81,7 @@ def parse_rss(raw: str, source_url: str = "", districts: list[str] | None = None
             "expires": "",
             "message_type": message_type,
             "ends": "",
-            "onset": published,
+            "onset": "",
             "detail": description,
             "references": [link] if link else [],
             "raw": {"title": title, "link": link, "guid": guid,

@@ -15,10 +15,10 @@ import math
 import secrets
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import (BURST_GAP_SECONDS, REPEAT_GAP_SECONDS, QUEUE_MAX, MAX_PAYLOAD_BYTES,
+from .config import (BURST_GAP_SECONDS, REPEAT_GAP_SECONDS, QUEUE_MAX, QUEUE_BYTE_MAX, MAX_PAYLOAD_BYTES,
                      MESHCORE_CHANNEL_TEXT_BYTES)
 
 
@@ -438,6 +438,37 @@ class QueueItem:
     verification: bool = False
     priority: int = 3
     notice_id: object = None
+    valid_if: object = None
+    queued_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class QueuedNotice:
+    """One admitted notice; materialise only its next radio part."""
+    parts: tuple[tuple[str, float], ...]
+    callback: object = None
+    priority: int = 3
+    valid_if: object = None
+    index: int = 0
+    notice_id: object = field(default_factory=object)
+    verification: bool = False
+    queued_at: float = field(default_factory=time.time)
+
+    @property
+    def text(self):
+        return self.parts[self.index][0]
+
+    @property
+    def remaining_bytes(self):
+        return sum(len(text.encode("utf-8")) for text, _ in self.parts)
+
+    def next_part(self):
+        index = self.index
+        text, delay = self.parts[index]
+        result_callback = self.callback
+        callback = (lambda ok, err="": result_callback(index, ok, err)) if result_callback else None
+        self.index += 1
+        return QueueItem(text, delay, callback, False, self.priority, self.notice_id, self.valid_if)
 
 
 def _build_transports(db) -> dict:
@@ -465,10 +496,12 @@ def _build_transports(db) -> dict:
 class TransmitManager:
     """Serializes node access, paces bursts, fans out to all enabled transports."""
 
+    supports_notice_guards = True
+
     def __init__(self, db):
         self._db = db
         self._transports = _build_transports(db)
-        self._queue: deque[QueueItem] = deque(maxlen=QUEUE_MAX + 1)    # 20 notice parts plus one verification
+        self._queue: deque[QueueItem | QueuedNotice] = deque(maxlen=QUEUE_MAX + 1)
         self._queue_event = asyncio.Event()
         self._verification_in_flight = False
         self._active_notice = None
@@ -551,7 +584,8 @@ class TransmitManager:
 
     @property
     def queue_depth(self) -> int:
-        return len(self._queue)
+        return sum(len(item.parts) - item.index if isinstance(item, QueuedNotice) else 1
+                   for item in self._queue)
 
     @property
     def last_error(self) -> str:
@@ -683,25 +717,24 @@ class TransmitManager:
         return True
 
     def enqueue_notice(self, parts: list[tuple[str, float]], on_result=None,
-                       priority: int = 3) -> bool:
+                       priority: int = 3, valid_if=None) -> bool:
         """Admit every part of one notice together, or defer the whole notice.
 
-        A verification message may occupy the single reserved slot. Parts stay
-        adjacent in FIFO order, including when several pollers submit at once.
+        A verification message may occupy the single reserved slot. Each pending
+        notice occupies one slot, regardless of its number of parts. Storage is
+        also bounded by QUEUE_BYTE_MAX; capacity refusal leaves history deferred.
         on_result(index, ok, error) runs once for each attempted part.
         """
-        if not parts or len(parts) > QUEUE_MAX or sum(not item.verification for item in self._queue) + len(parts) > QUEUE_MAX:
+        pending_bytes = sum(item.remaining_bytes if isinstance(item, QueuedNotice) else len(item.text.encode())
+                            for item in self._queue if not item.verification)
+        if (not parts or sum(not item.verification for item in self._queue) >= QUEUE_MAX
+                or pending_bytes + sum(len(text.encode()) for text, _ in parts) > QUEUE_BYTE_MAX):
             return False
         pending = next((item for item in self._queue if item.verification), None)
         if pending is not None:
             self._queue.remove(pending)
-        new_items = []
-        notice_id = object()
-        for index, (text, delay_after) in enumerate(parts):
-            callback = (lambda ok, err="", i=index: on_result(i, ok, err)) if on_result else None
-            new_items.append(QueueItem(text=text, delay_after=max(0.0, float(delay_after)),
-                                       on_result=callback, priority=priority,
-                                       notice_id=notice_id))
+        notice = QueuedNotice(tuple((text, max(0.0, float(delay))) for text, delay in parts),
+                              on_result, priority, valid_if)
         waiting = list(self._queue)
         protected = 0
         while (protected < len(waiting) and self._active_notice is not None
@@ -709,13 +742,35 @@ class TransmitManager:
             protected += 1
         insertion = next((index for index in range(protected, len(waiting))
                           if waiting[index].priority > priority), len(waiting))
-        waiting[insertion:insertion] = new_items
+        waiting.insert(insertion, notice)
         if pending is not None:
             waiting.append(pending)
         self._queue.clear()
         self._queue.extend(waiting)
         self._queue_event.set()
         return True
+
+    def _next_queued_part(self) -> QueueItem:
+        notice = self._queue[0]
+        if isinstance(notice, QueuedNotice):
+            item = notice.next_part()
+            if notice.index == len(notice.parts):
+                self._queue.popleft()
+            return item
+        return self._queue.popleft()
+
+    def _cancel_notice_remainder(self, notice_id, error):
+        """Finish every pending callback after a failed/stale notice part."""
+        if notice_id is None:
+            return
+        for notice in tuple(self._queue):
+            if notice.notice_id is not notice_id or not isinstance(notice, QueuedNotice):
+                continue
+            self._queue.remove(notice)
+            while notice.index < len(notice.parts):
+                part = notice.next_part()
+                if part.on_result is not None:
+                    self._safe_result(part.on_result, False, "Not attempted after notice stopped: " + error)
 
     def enqueue(self, text: str, channel: int | None = None, on_result=None,
                 delay_after: float = BURST_GAP_SECONDS) -> bool:
@@ -925,6 +980,10 @@ class TransmitManager:
         blen = len(item.text.encode())
         any_ok, last = False, ""
         async with self._lock:
+            if self._db.get_setting("dry_run", True):
+                return False, "Dry Run enabled before queued transmission"
+            if item.valid_if is not None and not item.valid_if():
+                return False, "Notice no longer current or selected before queued transmission"
             for t in self._transports.values():
                 if not t.enabled:
                     continue
@@ -946,7 +1005,7 @@ class TransmitManager:
                 except asyncio.CancelledError:
                     return
                 continue
-            item = self._queue.popleft()
+            item = self._next_queued_part()
             if item.notice_id is not None:
                 self._active_notice = item.notice_id
             if item.verification:
@@ -962,6 +1021,8 @@ class TransmitManager:
             try:
                 if item.on_result is not None:
                     self._safe_result(item.on_result, ok, err)
+                if not ok:
+                    self._cancel_notice_remainder(item.notice_id, err)
             finally:
                 if item.verification:
                     self._verification_in_flight = False

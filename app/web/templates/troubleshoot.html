@@ -3,12 +3,7 @@
 {% block content %}
 <h2>Troubleshoot</h2>
 
-<div class="panel">
-  <h3>Data persistence</h3>
-  <div class="kv"><span class="k">SQLite database</span><span class="v"><code>{{ db_path }}</code></span></div>
-  <div class="kv"><span class="k">Database size</span><span class="v">{{ db_size }} bytes</span></div>
-  <p class="hint">For Docker, this should be <code>/data/wx-echo.db</code>. The host <code>data/</code> directory must be retained when containers are recreated.</p>
-</div>
+{% include "_troubleshooting_dashboard.html" %}
 
 <div class="panel">
   <h3>Send test message</h3>

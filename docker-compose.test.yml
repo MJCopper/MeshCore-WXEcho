@@ -1,0 +1,11 @@
+# Local database storage for test checkouts on NFS or other shared filesystems.
+# Run with both files; Compose replaces the /data mount by its target path.
+services:
+  wx-echo:
+    volumes:
+      - wxecho-test-data:/data
+
+volumes:
+  wxecho-test-data:
+    external: true
+    name: wxecho-test-data

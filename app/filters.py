@@ -41,7 +41,7 @@ def should_include(event: str, rules: FilterRules) -> bool:
     event = (event or "").strip()
     if not event:
         return False
-    if event in rules.exclude_exact:
+    if any(_matches_product(event, product) for product in rules.exclude_exact):
         return False
     if any(_matches_product(event, product) for product in rules.include_exact):
         return True

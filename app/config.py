@@ -184,6 +184,7 @@ MULTIPART_GAP_SECONDS = 3
 
 REPEAT_GAP_SECONDS = 5   # gap between repeated copies of the same alert
 QUEUE_MAX = 20
+QUEUE_BYTE_MAX = 1024 * 1024  # pending notice text; full notices defer above this bound
 STATE_EXPIRY_HOURS = 48
 
 

@@ -100,8 +100,9 @@ async def test_first_live_poll_is_baseline_then_new_council_sends_current_item()
     assert db.latest_service_history("traffic", "incident:2")["disposition"] == "excluded-council"
     db.set_setting("traffic_councils", ["Central Coast", "Cessnock"])
     await poller.poll_once()
-    assert len(tx.sent) == 1
-    tx.sent[0][1](True, "")
+    assert tx.sent and "CRASH Pacific Highway" in tx.sent[0][0]
+    for _, callback in tx.sent:
+        callback(True, "")
     assert db.traffic_get_item("incident:2")["last_sent_hash"] == client.items[1].revision
     db.close()
 
@@ -122,7 +123,7 @@ async def test_ended_future_and_roadwork_are_recorded_but_not_sent():
     assert db.latest_service_history("traffic", "roadwork:1")["disposition"] == "excluded-hazard-type"
     db.set_setting("traffic_types", ["incident", "roadwork"])
     await poller.poll_once()
-    assert all("SCHEDULED ROADWORK" in text for text, _ in tx.sent)
+    assert "SCHEDULED ROADWORK" in tx.sent[0][0]
     assert tx.sent[-1][0].endswith("check livetraffic.com")
     db.close()
 
@@ -173,7 +174,7 @@ def test_traffic_settings_page_and_save():
 
 
 @pytest.mark.asyncio
-async def test_dry_run_preview_can_send_when_switched_live():
+async def test_dry_run_preview_preserves_first_live_baseline_then_new_item_sends():
     db = Database(":memory:")
     configure(db, dry_run=True)
     tx = Tx()
@@ -182,11 +183,16 @@ async def test_dry_run_preview_can_send_when_switched_live():
     assert not tx.sent
     db.set_setting("dry_run", False)
     await poller.poll_once()
-    assert len(tx.sent) == 1
-    assert db.latest_service_history("traffic", "incident:1")["transmit_status"] == "queued"
+    assert not tx.sent
+    assert db.latest_service_history("traffic", "incident:1")["disposition"] == "baseline"
+    poller.client.items.append(item("incident:2"))
+    await poller.poll_once()
+    first_count = len(tx.sent)
+    assert first_count > 0
+    assert db.latest_service_history("traffic", "incident:2")["transmit_status"] == "queued"
     assert db.traffic_recover_queued() == 1
     await poller.poll_once()
-    assert len(tx.sent) == 2
+    assert len(tx.sent) == first_count * 2
     db.close()
 
 
@@ -199,7 +205,9 @@ async def test_missing_item_is_recorded_without_claiming_road_reopened():
     client = Client([item()])
     poller = TrafficPoller(db, tx, client)
     await poller.poll_once()
-    tx.sent[0][1](True, "")
+    for _, callback in tx.sent:
+        callback(True, "")
+    first_count = len(tx.sent)
     client.items = []
     await poller.poll_once()
     assert db.latest_service_history("traffic", "incident:1")["transmit_status"] == "success"
@@ -207,7 +215,7 @@ async def test_missing_item_is_recorded_without_claiming_road_reopened():
     row = db.latest_service_history("traffic", "incident:1")
     assert row["disposition"] == "absent-from-feed"
     assert "unconfirmed" in row["detail"]
-    assert len(tx.sent) == 1
+    assert len(tx.sent) == first_count
     db.close()
 
 

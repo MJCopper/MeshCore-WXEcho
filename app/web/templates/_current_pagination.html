@@ -1,0 +1,5 @@
+<nav aria-label="Source results pages" style="margin:16px 0;">
+  <span>Showing {{ pagination.first }}–{{ pagination.last }} of {{ pagination.total }} items · Page {{ pagination.page }} of {{ pagination.pages }}</span>
+  {% if pagination.page > 1 %}<a href="?page={{ pagination.page - 1 }}" rel="prev">Previous</a>{% endif %}
+  {% if pagination.page < pagination.pages %}<a href="?page={{ pagination.page + 1 }}" rel="next">Next</a>{% endif %}
+</nav>

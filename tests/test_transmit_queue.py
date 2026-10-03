@@ -157,11 +157,12 @@ def test_verification_has_reserved_place_after_full_warning_queue():
 
 def test_notice_admission_is_atomic_and_never_evicts_prior_parts():
     tx = TransmitManager(_FakeDb())
-    for index in range(QUEUE_MAX - 1):
+    for index in range(QUEUE_MAX):
         assert tx.enqueue(f"older-{index}")
     before = [item.text for item in tx._queue]
     assert not tx.enqueue_notice([("1/2 newer", 3), ("2/2 newer", 30)])
     assert [item.text for item in tx._queue] == before
+    tx._next_queued_part()
     assert tx.enqueue_notice([("one-part", 30)])
     assert tx.enqueue_verification("verification")
     assert [item.text for item in tx._queue][-2:] == ["one-part", "verification"]
@@ -173,14 +174,17 @@ def test_priority_keeps_parts_together_and_verification_last():
     assert tx.enqueue_verification("verification")
     assert tx.enqueue_notice([("bom-a", 3), ("bom-b", 30)], priority=1)
     assert tx.enqueue_notice([("rfs-emergency", 30)], priority=0)
-    assert [item.text for item in tx._queue] == [
+    emitted = []
+    while tx._queue:
+        emitted.append(tx._next_queued_part().text)
+    assert emitted == [
         "rfs-emergency", "bom-a", "bom-b", "traffic-a", "traffic-b", "verification"]
 
 
 def test_new_priority_notice_waits_for_active_multipart_notice():
     tx = TransmitManager(_FakeDb())
     assert tx.enqueue_notice([("traffic-a", 3), ("traffic-b", 30)], priority=5)
-    transmitting = tx._queue.popleft()
+    transmitting = tx._next_queued_part()
     tx._active_notice = transmitting.notice_id
     assert tx.enqueue_notice([("rfs-emergency", 30)], priority=0)
     assert [item.text for item in tx._queue] == ["traffic-b", "rfs-emergency"]

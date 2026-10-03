@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 import datetime
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Request, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -15,6 +15,7 @@ from .. import __version__
 from ..config import MAX_PAYLOAD_BYTES, MIN_POLL_MINUTES, polling_seconds
 from ..rfs.councils import COUNCILS
 from ..meshcore_discovery import list_usb_serial_devices
+from ..presentation import freshness
 
 
 def _template_dir() -> Path:
@@ -28,9 +29,10 @@ def _template_dir() -> Path:
 router = APIRouter()
 TEMPLATES = Jinja2Templates(directory=str(_template_dir()))
 
-from ..formatter import fmt_local
+from ..formatter import fmt_local, fmt_epoch
 from ..history import history_sources, get_history_source, history_source_label
 TEMPLATES.env.filters["localtime"] = fmt_local
+TEMPLATES.env.filters["epochlocal"] = fmt_epoch
 
 
 # History/dashboard status labels describe the FILTER decision, not transmission
@@ -483,14 +485,28 @@ async def settings_page(request: Request):
 
 
 @router.get("/bom", response_class=HTMLResponse)
-async def bom_page(request: Request):
+async def bom_page(request: Request, page: int = Query(1, ge=1)):
     db = _db(request)
     regions = ["NSW"]
     poll_status = _poller(request).status
+    rows, pagination = db.current_listing("bom", page)
+    snapshots = {row["region"]: row["fetched_at"] for row in db.bom_snapshot_regions(regions)}
+    area_labels = {"aac:lga": "Council", "lga": "Council", "abs:lga": "Council",
+                   "aac:district": "Forecast district", "aac:coast": "Marine coast",
+                   "aac:region": "Region", "state": "State"}
+    items = []
+    for row in rows:
+        item = dict(row)
+        for key in ("matched_councils", "warning_sections", "provider_areas"):
+            item[key] = json.loads(item[key] or "[]")
+        item["provider_areas"] = [area | {"label": area_labels.get(area["type"], "Provider area")}
+                                  for area in item["provider_areas"]]
+        items.append(item)
     return render(
-        request, "bom.html", items=[dict(row) | {"matched_councils": json.loads(row["matched_councils"] or "[]")}
-                                    for row in db.bom_current_items(regions)],
-        snapshots={row["region"]: row["fetched_at"] for row in db.bom_snapshot_regions(regions)},
+        request, "bom.html", items=items, pagination=pagination,
+        snapshot_freshness=freshness(snapshots.get("NSW", ""), db.get_setting("bom_poll_minutes", 5),
+                                     db.get_setting("bom_enabled", True)),
+        snapshots=snapshots,
         regions=regions, bom_enabled=bool(db.get_setting("bom_enabled", True)),
         bom_status=poll_status.last_poll_result,
         bom_last_poll=poll_status.last_poll_time,
@@ -839,7 +855,7 @@ async def troubleshoot(request: Request):
             pass
     return render(request, "troubleshoot.html",
                   errors=db.recent_errors(), transports=_tx(request).status(),
-                  db_path=db_path, db_size=db_size)
+                  db_path=db_path, db_size=db_size, s=db.all_settings())
 
 
 @router.post("/troubleshoot/clear-errors", response_class=HTMLResponse)

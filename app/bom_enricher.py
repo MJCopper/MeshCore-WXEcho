@@ -23,6 +23,11 @@ class BOMEnrichment:
     sections: tuple["WarningSection", ...] = ()
     area_names: tuple[str, ...] = ()
     polygons: tuple[str, ...] = ()
+    issued: str = ""
+    expires: str = ""
+    lga_names: tuple[str, ...] = ()
+    status: str = ""
+    geocodes: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -95,13 +100,24 @@ def _strip_markup(value: str) -> str:
 
 
 def parse_warning_api(payload: dict) -> BOMEnrichment:
-    warning = payload.get("warning", {}) or {}
+    if not isinstance(payload, dict):
+        raise ValueError("BOM warning API did not return an object")
+    warning = payload.get("warning", {})
+    if warning is None:
+        warning = {}
+    if not isinstance(warning, dict):
+        raise ValueError("BOM warning API returned an invalid warning")
     info = warning.get("info", []) or []
+    if not isinstance(info, list) or any(not isinstance(item, dict) for item in info):
+        raise ValueError("BOM warning API returned invalid warning information")
     summaries = []
     locations = ""
     geocodes = []
     area_names = []
     polygons = []
+    lga_names = []
+    untyped_footprint = False
+    geographic_codes = []
     for item in info:
         summary = _strip_markup(item.get("summary", ""))
         if summary:
@@ -112,11 +128,24 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
             if match and not locations:
                 locations = _clean_sentence(match.group(1))
         for area in item.get("area", []) or []:
+            if not isinstance(area, dict):
+                raise ValueError("Invalid BOM warning area")
             area_name = _strip_markup(area.get("area_desc", ""))
             if area_name and area_name not in area_names:
                 area_names.append(area_name)
             for code in area.get("geocode", []) or []:
+                if not isinstance(code, dict):
+                    raise ValueError("Invalid BOM warning geocode")
                 name = (code.get("name") or "").strip()
+                code_type = str(code.get("type") or "").casefold()
+                geographic_code = (code_type, str(code.get("code") or ""), name)
+                if geographic_code not in geographic_codes:
+                    geographic_codes.append(geographic_code)
+                if name and code_type in {"lga", "aac:lga", "abs:lga", "local government area", "local-government-area"}:
+                    if name not in lga_names:
+                        lga_names.append(name)
+                elif name and code_type not in {"aac:region", "region", "state"}:
+                    untyped_footprint = True
                 if name and name not in geocodes:
                     geocodes.append(name)
             raw_polygons = area.get("polygon", []) or []
@@ -125,17 +154,17 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
             for polygon in raw_polygons:
                 if isinstance(polygon, str) and polygon not in polygons:
                     polygons.append(polygon)
+            if not area.get("geocode") and area_name:
+                untyped_footprint = True
     if not locations:
         locations = _clean_sentence(
             _strip_markup(warning.get("area_summary", "")))
     if not locations and geocodes:
         locations = _clean_sentence(", ".join(geocodes))
-    candidates = [s for s in summaries if "likely to produce" in s.lower()]
-    if not candidates:
-        candidates = summaries
+    candidates = summaries
     if not candidates:
         candidates = [_strip_markup(warning.get("phenomena_summary", ""))]
-    summary = _clean_sentence(candidates[0]) if candidates and candidates[0] else ""
+    summary = _clean_sentence("; ".join(dict.fromkeys(candidates))) if candidates else ""
     sections = []
     for item in info:
         if str(item.get("is_hazard", "")).lower() != "true":
@@ -149,8 +178,14 @@ def parse_warning_api(payload: dict) -> BOMEnrichment:
             phase=str(item.get("phase") or ""),
             onset=str(item.get("onset_datetime_utc") or ""),
         ))
+    meta = payload.get("meta") or {}
     return BOMEnrichment(locations=locations, summary=summary, sections=tuple(sections),
-                         area_names=tuple(area_names or geocodes), polygons=tuple(polygons))
+                         area_names=tuple(area_names or geocodes), polygons=tuple(polygons),
+                         issued=str(meta.get("issue_datetime_utc") or "") if isinstance(meta, dict) else "",
+                         expires=str(warning.get("expires_datetime_utc") or ""),
+                         lga_names=tuple(lga_names) if not untyped_footprint else (),
+                         status="available" if warning else "unavailable",
+                         geocodes=tuple(geographic_codes))
 
 
 def _warning_api_url(url: str) -> str:

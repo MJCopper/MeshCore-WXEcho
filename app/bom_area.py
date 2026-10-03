@@ -18,9 +18,10 @@ class CouncilMatch:
     status: str  # matched or unknown
     councils: tuple[str, ...] = ()
     method: str = ""
+    reason: str = ""
 
 
-def _explicit_councils(names: tuple[str, ...]) -> CouncilMatch | None:
+def _explicit_councils(names: tuple[str, ...], typed: bool = False) -> CouncilMatch | None:
     known = {council_key(name): name for name in COUNCILS}
     found = set()
     for text in names:
@@ -28,11 +29,14 @@ def _explicit_councils(names: tuple[str, ...]) -> CouncilMatch | None:
             continue
         # A partial list cannot prove that another selected council is outside.
         for piece in re.split(r"\s*(?:,|;|\band\b)\s*", text, flags=re.I):
+            if not typed and not re.search(r"\b(?:council|shire|municipality|regional|city)\b", piece, re.I):
+                return None
             key = council_key(piece.strip())
             if key not in known:
                 return None
             found.add(known[key])
-    return CouncilMatch("matched", tuple(sorted(found)), "LGA names") if found else None
+    return CouncilMatch("matched", tuple(sorted(found)), "typed LGA names" if typed else "explicit LGA names",
+                        "Provider supplied an administrative council designation") if found else None
 
 
 def _cap_polygon(value) -> list[tuple[float, float]]:
@@ -75,7 +79,7 @@ def _overlaps(warning: list[tuple[float, float]], rings: list) -> bool:
 
 
 def match_councils(area: str, area_names: tuple[str, ...], polygons: tuple[str, ...],
-                   prepared: list[tuple] | None = None) -> CouncilMatch:
+                   prepared: list[tuple] | None = None, typed_lgas: tuple[str, ...] = ()) -> CouncilMatch:
     if polygons and prepared:
         matches = set()
         canonical = {council_key(name): name for name in COUNCILS}
@@ -93,5 +97,12 @@ def match_councils(area: str, area_names: tuple[str, ...], polygons: tuple[str, 
                     if _overlaps(ring, rings):
                         matches.add(canonical.get(council_key(name), name))
         if valid == len(polygons) and matches:
-            return CouncilMatch("matched", tuple(sorted(matches)), "polygon")
-    return _explicit_councils(area_names or (area,)) or CouncilMatch("unknown")
+            return CouncilMatch("matched", tuple(sorted(matches)), "polygon",
+                                "Warning polygon intersects simplified council boundaries; borders are approximate")
+        return CouncilMatch("unknown", reason="Warning polygons are incomplete, invalid or outside the council snapshot")
+    if polygons:
+        return CouncilMatch("unknown", reason="Council boundaries unavailable for warning polygon matching")
+    if typed_lgas:
+        return _explicit_councils(typed_lgas, typed=True) or CouncilMatch("unknown", reason="Unrecognised typed LGA names")
+    return _explicit_councils(area_names or (area,)) or CouncilMatch(
+        "unknown", reason="Place, forecast district or coast names do not establish a council footprint")

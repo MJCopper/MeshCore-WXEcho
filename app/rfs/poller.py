@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -15,18 +16,27 @@ logger = logging.getLogger("wx_echo.rfs")
 
 
 def format_incident(incident, budget: int, action: str = "NEW") -> list[str]:
-    full_topic = f"{incident.level or 'Incident'}: {incident.name or 'unnamed incident'}"
-    topic, shortened = compact_topic(full_topic, "NSW RFS", action, budget,
-                                     "check rfs.nsw.gov.au")
-    details = [incident.name] if shortened and incident.name else []
-    if incident.location and council_key(incident.location) != council_key(incident.name):
-        details.append(incident.location)
+    # Keep the alert level on every part; put the location in the body once.
+    topic, _ = compact_topic(incident.level or "Incident", "NSW RFS", action,
+                             budget, "check rfs.nsw.gov.au")
+    name, location = incident.name.strip(), incident.location.strip()
+    name_key, location_key = council_key(name), council_key(location)
+    if name_key and name_key in location_key:
+        details = [location]
+    elif location_key and location_key in name_key:
+        details = [name]
+    else:
+        details = [value for value in (name, location) if value]
     if incident.kind and incident.kind.casefold() not in incident.name.casefold():
         details.append(incident.kind)
     if incident.council:
         details.append(f"{incident.council} council")
     if incident.status:
         details.append(incident.status)
+    if incident.size:
+        details.append("Reported size: " + incident.size)
+    if incident.agency:
+        details.append("Agency: " + incident.agency)
     return frame_notice("NSW RFS", action, topic,
                         ["; ".join(details) or "current incident"], "check rfs.nsw.gov.au",
                         budget, incident.incident_id)
@@ -36,6 +46,7 @@ class RFSPoller:
     def __init__(self, db, tx, client=None):
         self.db, self.tx = db, tx
         self.client = client or RFSClient()
+        self._poll_lock = asyncio.Lock()
         self.task = None
         self.event = asyncio.Event()
         self.last_poll = ""
@@ -78,11 +89,21 @@ class RFSPoller:
             self.event.clear()
             try:
                 interval = polling_seconds(self.db.get_setting("rfs_poll_minutes", 10), 10)
+                self.next_poll_at = datetime.fromtimestamp(time.time() + interval, timezone.utc).isoformat()
                 await asyncio.wait_for(self.event.wait(), interval)
             except asyncio.TimeoutError:
                 pass
 
-    async def poll_once(self):
+    async def poll_once(self, *, replay_items=None, force=False):
+        async with self._poll_lock:
+            started = time.monotonic()
+            try:
+                return await self._poll_once(replay_items=replay_items, force=force)
+            finally:
+                if replay_items is None:
+                    self.last_poll_duration = round(time.monotonic() - started, 3)
+
+    async def _poll_once(self, *, replay_items=None, force=False):
         settings = self.db.all_settings()
         if not settings.get("rfs_enabled", False):
             self.last_result = "disabled"
@@ -91,13 +112,17 @@ class RFSPoller:
             self.last_result = "select councils or All NSW"
             return
         try:
-            incidents = await self.client.fetch()
+            incidents = replay_items if replay_items is not None else await self.client.fetch()
         except RFSFeedError as exc:
             self.last_poll = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.last_result = f"error: {exc}"
             self.db.add_error("rfs", str(exc))
             return
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        settings = self.db.all_settings()
+        if not settings.get("rfs_enabled", False):
+            self.last_result = "disabled"
+            return
         self.last_poll = now
         self.last_result = f"ok: {len(incidents)} RFS incidents"
         selected = {council_key(x) for x in settings.get("rfs_councils", [])}
@@ -108,8 +133,12 @@ class RFSPoller:
         queued = False
         priority = {"Emergency Warning": 0, "Watch and Act": 1, "Advice": 2}
         for incident in sorted(incidents, key=lambda i: priority.get(i.level, 3)):
+            if not self.db.get_setting("rfs_enabled", False):
+                self.last_result = "disabled"
+                return
             previous = self.db.rfs_get_incident(incident.incident_id)
-            self.db.rfs_save_incident(incident, incident.revision)
+            if replay_items is None:
+                self.db.rfs_save_incident(incident, incident.revision)
             council = council_key(incident.council)
             reason = ("alert level" if incident.level not in levels else
                       "council" if council not in (known_nsw if settings.get("rfs_all_councils") else selected) else "")
@@ -119,12 +148,12 @@ class RFSPoller:
                 if not latest or latest["revision_hash"] != incident.revision or latest["disposition"] != disposition:
                     self.db.rfs_add_history(incident, "", "", f"Excluded by {reason} selection", disposition)
                 continue
-            if previous and previous["last_sent_hash"] == incident.revision:
+            if not force and previous and previous["last_sent_hash"] == incident.revision:
                 continue
             latest = self.db.rfs_latest_broadcast(incident.incident_id)
             if latest and latest["revision_hash"] == incident.revision and latest["transmit_status"] == "queued":
                 continue
-            if latest and latest["revision_hash"] == incident.revision and latest["transmit_status"] == "dry-run" and dry_run:
+            if latest and latest["revision_hash"] == incident.revision and latest["transmit_status"] == "dry-run" and dry_run and not force:
                 continue
             action = "UPDATE" if previous and previous["last_sent_hash"] else "NEW"
             parts = format_incident(incident, budget, action=action)
@@ -134,7 +163,7 @@ class RFSPoller:
             if dry_run:
                 self.db.rfs_add_history(incident, text, "dry-run")
                 continue
-            retry_row = (latest if latest and latest["revision_hash"] == incident.revision
+            retry_row = (latest if latest and (not force or latest["transmit_status"] == "deferred") and latest["revision_hash"] == incident.revision
                          and latest["transmitted_text"] == text
                          and latest["transmit_status"] in ("failed", "interrupted", "deferred") else None)
             row_id = retry_row["id"] if retry_row else self.db.rfs_add_history(incident, text, "queued")
@@ -163,15 +192,26 @@ class RFSPoller:
                     self.db.rfs_update_history(row, "failed", state["error"])
                     self.db.add_error("rfs", f"RFS broadcast failed: {item.name}: {state['error']}")
 
+            def valid_if(item=incident):
+                current = self.db.all_settings()
+                saved = self.db.rfs_get_incident(item.incident_id)
+                selected_now = known_nsw if current.get("rfs_all_councils") else {
+                    council_key(x) for x in current.get("rfs_councils", [])}
+                return bool(current.get("rfs_enabled") and saved and saved["missing_polls"] < 2
+                            and saved["revision_hash"] == item.revision
+                            and item.level in current.get("rfs_levels", [])
+                            and council_key(item.council) in selected_now)
+
             if submit_notice(self.tx, [parts[i] for i in indices], on_result,
-                             priority=0 if incident.level == "Emergency Warning" else 2):
+                             priority=0 if incident.level == "Emergency Warning" else 2,
+                             valid_if=valid_if):
                 queued = True
             else:
                 status, reason = queue_refusal(parts)
                 self.db.rfs_update_history(row_id, status, reason)
                 if status == "failed":
                     self.db.add_error("rfs", reason)
-        for missing in self.db.rfs_missing_after_poll({item.incident_id for item in incidents}):
+        for missing in ([] if replay_items is not None else self.db.rfs_missing_after_poll({item.incident_id for item in incidents})):
             if missing["missing_polls"] != 2:
                 continue
             latest = self.db.rfs_latest_history(missing["incident_id"])
@@ -187,7 +227,9 @@ class RFSPoller:
             )
         if queued:
             self._queue_verification(dry_run)
-        self.last_successful_poll = self.last_poll
+        if replay_items is None:
+            self.last_successful_poll = self.last_poll
+            self.db.set_setting("rfs_last_successful_poll", self.last_poll)
 
     def _queue_verification(self, dry_run: bool):
         budget = getattr(self.tx, "message_budget", MAX_PAYLOAD_BYTES)

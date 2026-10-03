@@ -38,7 +38,7 @@ History shows each part's outcome and the time the local radio confirmed transmi
 
 ## Broadcast content
 
-BOM, NSW RFS and Live Traffic NSW notices use the same on-air framing: source, NEW/UPDATE/CANCELLED action, hazard or alert level, and a complete `check …` source note. Multipart notices repeat the source and context on every part and share a short reference and part number. The source note stays whole; if it needs a separate part, that part is numbered too. BOM area lists and available warning summaries are split across messages rather than shortened to “surrounding areas”. Traffic notices include both impact and distinct advice when supplied. BOM dates and reliable Traffic end times include the local date; RFS update strings are not broadcast as times because their timezone is not established by the feed.
+BOM, NSW RFS and Live Traffic NSW notices use the same on-air framing: source, NEW/UPDATE/CANCELLED action, hazard or alert level, and a complete `check …` source note. Multipart notices start with their part number (`1/2`, `2/2`). Only the first part includes the source, action, short reference and hazard or alert level; subsequent parts carry the remaining content. Changes of hazard type or cancellation within a notice retain an explicit section label. The source note stays whole; if it needs a separate part, that part is numbered too. BOM area lists and available warning summaries are split across messages rather than shortened to “surrounding areas”. Traffic notices include both impact and distinct advice when supplied. BOM dates and reliable Traffic end times include the local date; RFS update strings are not broadcast as times because their timezone is not established by the feed.
 
 ## Features
 
@@ -59,6 +59,15 @@ docker compose up -d
 ```
 
 Open `http://<host>:8110` and configure BOM warning products, council coverage and MeshCore connection in Settings. The compose file bind-mounts the repository's `data/` directory at `/data` for the SQLite database and mounts `/dev` for USB serial access.
+
+If the test checkout is on NFS and startup fails with `sqlite3.OperationalError: unable to open database file`, use local Docker storage for the database:
+
+```bash
+docker volume create wxecho-test-data
+docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+```
+
+This stores test settings and history in the external Docker volume `wxecho-test-data`. Creating the volume again is safe and retains its contents. Use both Compose files for subsequent commands. It does not copy an existing `data/wx-echo.db`; back up and migrate that database before switching if it contains settings or history you need. Compose preserves this external volume, including with `down -v`; removing it explicitly with `docker volume rm` deletes the test database.
 
 ### Data persistence and backup
 
@@ -98,7 +107,17 @@ The application uses BOM's public NSW warning RSS feed, including the warning li
 
 Recent warning revisions and the History page record each distinct BOM version received from the NSW feed, including warnings excluded by broadcast filters. An unchanged warning is not added again on every poll. The Events log records each dry-run attempt, so it can grow while History stays the same. The unofficial verification message is queued after warning parts and sent at most once per five minutes on the live channel; its last successful send time survives restarts. Dry-run shows the same five-minute cadence.
 
-The default broadcast policy includes all BOM warning products. Settings can instead select individual Australian warning products, plus additional products such as Flood Watch, Tropical Cyclone Advice, Road Weather Alert and Bush Walkers Weather Alert. Timestamped RSS titles and `Marine Wind Warning Summary` items are normalized before filtering; qualified flood products and numbered tropical cyclone products match their corresponding product selection. Council matching uses BOM warning polygons when supplied, or a complete list of council names. Broad forecast districts, marine coasts, and incomplete location descriptions are marked unknown rather than treated as outside a selected council. Existing non-NSW current snapshots and rows with proven non-NSW provenance are removed on upgrade; older History without reliable source provenance is retained. For marine wind warnings whose RSS item contains only a statewide summary, WXEcho resolves the linked BOM product ID and reads the warning detail API. Strong Wind Warning areas and cancellations are sent as separately labelled parts. If detail is unavailable, it falls back to the RSS summary.
+The default broadcast policy includes all BOM warning products. Settings can instead select individual Australian warning products, plus additional products such as Flood Watch, Tropical Cyclone Advice, Road Weather Alert and Bush Walkers Weather Alert. Timestamped RSS titles and `Marine Wind Warning Summary` items are normalized before filtering; qualified flood products and numbered tropical cyclone products match their corresponding product selection. Council matching uses BOM warning polygons when supplied, or complete typed LGA names or explicitly administrative council names. Broad forecast districts, marine coasts, and incomplete location descriptions are marked unknown rather than treated as outside a selected council. Existing non-NSW current snapshots and rows with proven non-NSW provenance are removed on upgrade; older History without reliable source provenance is retained. For marine wind warnings whose RSS item contains only a statewide summary, WXEcho resolves the linked BOM product ID and reads the warning detail API. Strong Wind Warning areas and cancellations are sent as separately labelled parts. If detail is unavailable, it falls back to the RSS summary.
+
+## Filtering, delivery and source health
+
+Source pages show total counts and pagination, match methods, exclusions, feed freshness and enrichment/fallback status. Traffic feeds fail independently; only successful feeds advance disappearance counters and their first-live baseline. Roadwork notice activity is separate from its schedule: missing timezone or ambiguous timing is shown as unknown, without claiming a road is currently closed.
+
+Multipart notices stream through a queue bounded by 20 pending notices and 1 MiB of stored text. Longer notices are not truncated or rejected merely for exceeding 20 parts. Capacity defers delivery, and restart recovery retries unconfirmed parts. RFS size/agency and Traffic schedules, transport information, advice and diversions are preserved. See [implementation and validation](docs/filtering-implementation.md) and the [original review](docs/filtering-review.md).
+
+## Troubleshooting and recovery
+
+The [Troubleshoot page](http://localhost:8110/troubleshoot) shows all source services, per-feed Traffic health, radio/queue status and database diagnostics. It includes Poll now, previewed re-process/resend actions, job progress/cancellation, live application/stdout/stderr logs and redacted diagnostic export. Actions retain saved service and dry-run controls. See [recovery behaviour and diagnostics](docs/troubleshooting.md).
 
 ## MeshCore setup
 

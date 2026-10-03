@@ -23,7 +23,8 @@ def warning(alert_id, area, region="NSW"):
 
 
 def test_explicit_lga_and_polygon_council_matches():
-    assert match_councils("Tamworth", (), ()).councils == ("Tamworth Regional",)
+    assert match_councils("Tamworth", (), ()).status == "unknown"
+    assert match_councils("Tamworth Regional Council", (), ()).councils == ("Tamworth Regional",)
     assert match_councils("Hunter", (), ()).status == "unknown"
     assert match_councils("Tamworth and Hunter", (), ()).status == "unknown"
     boundaries = [{"properties": {"lganame": "Tamworth Regional"}, "geometry": {
@@ -43,7 +44,7 @@ async def test_bom_council_filter_records_match_and_unknown_decisions():
     db.set_setting("bom_councils", ["Tamworth Regional"])
     poller = BomPoller(db, Radio())
     rules = FilterRules([], ["Warning"], [])
-    for alert_id, area in (("match", "Tamworth"), ("other", "Campbelltown"),
+    for alert_id, area in (("match", "Tamworth Regional Council"), ("other", "Campbelltown Council"),
                            ("broad", "Hunter")):
         await poller._process(warning(alert_id, area), rules, "Australia/Sydney", 0, True)
     rows = {row["external_id"]: row for row in db.query_service_history(source="bom")}
@@ -112,7 +113,7 @@ async def test_newly_selected_council_reconsiders_existing_warning():
     db.set_setting("bom_councils", ["Campbelltown"])
     poller = BomPoller(db, Radio())
     rules = FilterRules([], ["Warning"], [])
-    alert = warning("coverage", "Tamworth")
+    alert = warning("coverage", "Tamworth Regional Council")
     await poller._process(alert, rules, "Australia/Sydney", 0, True)
     assert db.latest_history("coverage")["disposition"] == "filtered"
     db.set_setting("bom_councils", ["Campbelltown", "Tamworth Regional"])
@@ -131,7 +132,7 @@ async def test_expanding_selected_councils_reconsiders_previously_sent_warning()
     db.set_setting("bom_councils", ["Tamworth Regional"])
     poller = BomPoller(db, Radio())
     rules = FilterRules([], ["Warning"], [])
-    alert = warning("multi-council", "Tamworth and Campbelltown")
+    alert = warning("multi-council", "Tamworth Regional Council and Campbelltown Council")
     await poller._process(alert, rules, "Australia/Sydney", 0, True)
     db.upsert_state(alert_id="multi-council", event="Flood Warning",
                     headline=alert["headline"], expires="",
