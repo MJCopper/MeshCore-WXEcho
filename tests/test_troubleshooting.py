@@ -437,3 +437,33 @@ def test_installed_capture_collects_logging_stdout_and_stderr():
         assert any(r['service']=='wx_echo.rfs' and '[redacted]' in r['message'] for r in data)
     finally:
         logs.close()
+
+
+@pytest.mark.asyncio
+async def test_resend_job_explicitly_reports_simulation(environment):
+    app=environment
+    seed(app,'rfs')
+    app.state.db.set_setting('dry_run',True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+        preview=(await client.post('/troubleshoot/preview',json={'source':'rfs','mode':'resend'})).json()
+        assert preview['notices']==1 and preview['dry_run'] is True
+        started=(await client.post('/troubleshoot/replay',json={'token':preview['token']})).json()
+        assert started['dry_run'] is True
+        await app.state.troubleshooting.task
+        result=(await client.get('/troubleshoot/job')).json()
+        assert result['dry_run'] is True and result['results']['dry-run']==1
+        assert app.state.tx.sent==[]
+        assert app.state.db.get_setting('dry_run') is True
+
+
+@pytest.mark.asyncio
+async def test_resend_page_explains_why_dry_run_does_not_transmit(environment):
+    from app.web.routes import router as web_router
+    app=environment
+    app.state.db.set_setting('dry_run',True)
+    app.include_router(web_router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+        page=(await client.get('/troubleshoot')).text
+        assert 'Dry Run is enabled: resend only simulates delivery' in page
+        assert 'href="/settings/general"' in page
+        assert 'Start simulation — no transmission' in page

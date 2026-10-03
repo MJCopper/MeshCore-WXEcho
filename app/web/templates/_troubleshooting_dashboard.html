@@ -9,6 +9,12 @@
   <h3>Re-process or resend current notices</h3>
   <p>Re-process applies current filters and retains duplicate suppression. Resend bypasses delivery deduplication for eligible notices. Both retain service, council/product, expiry and dry-run controls. Notices already queued are skipped.</p>
   <p class="hint">Uses stored provider inputs; run Poll now first if you need the latest notices. Resend preview lists all eligible notices. Re-process may leave already delivered notices unchanged.</p>
+  {% if s.get('dry_run', True) %}
+  <p id="replay-mode-warning"><strong>Dry Run is enabled: resend only simulates delivery. No radio messages will be sent.</strong>
+    To transmit, disable Dry Run in <a href="/settings/general">General settings</a>, then create a new preview.</p>
+  {% else %}
+  <p id="replay-mode-warning">Live delivery is enabled. Eligible notices will be queued for the configured companion.</p>
+  {% endif %}
   <label>Service <select id="replay-source" onchange="invalidatePreview()"><option value="all">All services</option><option value="bom">BOM</option><option value="rfs">NSW RFS</option><option value="traffic">Live Traffic NSW</option></select></label>
   <label>Action <select id="replay-mode" onchange="invalidatePreview()"><option value="reprocess">Re-process current notices</option><option value="resend">Resend eligible current notices</option></select></label>
   <button onclick="previewReplay()">Preview action</button>
@@ -39,7 +45,7 @@
   <pre id="live-logs" style="white-space:pre-wrap;word-break:break-word;max-height:450px;overflow:auto;background:var(--bg);padding:12px"></pre>
 </div>
 <script>
-let previewToken=null, logCursor=0, logPaused=false, logLines=[], logsBusy=false, logGeneration=0;
+let previewToken=null, previewGeneration=0, replayStarting=false, logCursor=0, logPaused=false, logLines=[], logsBusy=false, logGeneration=0;
 function el(id){return document.getElementById(id)}
 function show(id,value){el(id).textContent=value}
 function local(value){if(!value)return 'Not yet';const d=new Date(value);return isNaN(d)?value:d.toLocaleString(undefined,{timeZone:{{ (s.get('display_timezone') or 'Australia/Sydney')|tojson }}})}
@@ -48,12 +54,74 @@ function appendText(container,tag,text){const node=document.createElement(tag);n
 async function refreshDiagnostics(){try{const d=await api('status');show('diagnostic-summary',(d.dry_run?'DRY RUN — automatic delivery is simulated':'LIVE — eligible notices may transmit')+' · Updated '+new Date().toLocaleTimeString());const target=el('service-diagnostics');target.replaceChildren();for(const s of d.services){const box=appendText(target,'section','');appendText(box,'h4',s.source.toUpperCase()+' — '+(s.enabled?'Enabled':'Disabled'));appendText(box,'p','Last attempt: '+local(s.last_attempt)+' · Last successful collection: '+local(s.last_success)+' · Next scheduled poll: '+local(s.next_poll));appendText(box,'p','Interval: '+s.interval_seconds/60+' min · Last poll duration: '+(s.poll_duration_seconds??'unknown')+' seconds · Current records: '+s.collected+' · '+s.result+' · '+s.freshness);appendText(box,'p','Current notices: last recorded decisions and delivery '+JSON.stringify(s.last_decisions));appendText(box,'p','Lifetime History counts: '+JSON.stringify(s.history_counts));if(s.uncertain)appendText(box,'p','Geographic uncertainty/fallback: '+s.uncertain+' records');if(s.source==='bom')appendText(box,'p','Enrichment: '+JSON.stringify(s.enrichment));for(const x of s.exclusions)appendText(box,'p',x.count+' excluded: '+x.detail);const b=appendText(box,'button','Poll '+s.source.toUpperCase()+' now');b.className='secondary';b.onclick=()=>pollSource(s.source);}
 if(d.traffic_feeds.length){appendText(target,'h4','Traffic feed health');for(const f of d.traffic_feeds)appendText(target,'p',f.feed+' · '+(f.requested?'Requested':'Not requested with current settings')+' · Checked '+local(f.last_checked)+' · Success '+local(f.last_success)+' · Published '+local(f.published)+' · '+(f.error||'No recorded error')+' · '+f.freshness);}
 show('delivery-diagnostics',JSON.stringify(d.queue,null,2)+'\nRadios: '+JSON.stringify(d.radios,null,2)+'\nLast confirmed send: '+JSON.stringify(d.last_confirmed));el('delivery-diagnostics').style.whiteSpace='pre-wrap';show('application-diagnostics','Version '+d.version+' · Uptime '+d.uptime_seconds+' seconds · Starts '+d.restart_count+' · Previous start '+local(d.previous_start)+'\nDatabase: '+d.database.path+' · '+d.database.bytes+' bytes · Write probe '+(d.database.writable?'passed':'failed')+' · SQLite '+d.database.sqlite_version+'\nMigrations: '+JSON.stringify(d.database.migrations)+'\nBoundaries: '+d.boundaries);el('application-diagnostics').style.whiteSpace='pre-wrap';}catch(e){show('diagnostic-summary',e.message)}}
-function invalidatePreview(){previewToken=null;el('start-replay').style.display='none';show('replay-preview','Create a new preview for this selection')}
-async function previewReplay(){previewToken=null;el('start-replay').style.display='none';show('replay-preview','Preparing preview…');try{const p=await api('preview',{source:el('replay-source').value,mode:el('replay-mode').value});const target=el('replay-preview');target.replaceChildren();appendText(target,'p',p.mode+' '+p.source+' · '+p.notices+' eligible notices · '+p.parts+' estimated message parts · '+(p.dry_run?'DRY RUN':'LIVE'));for(const x of p.exclusions)appendText(target,'p',x.source+': '+x.count+' excluded — '+x.reason);for(const e of p.errors)appendText(target,'p','Cannot proceed: '+e);for(const item of p.details){const detail=appendText(target,'details','');appendText(detail,'summary',item.source.toUpperCase()+': '+item.title+' ('+item.parts+' parts)');const text=appendText(detail,'pre',item.text.split(' || ').join('\n'));text.style.whiteSpace='pre-wrap';}if(!p.errors.length){previewToken=p.token;el('start-replay').textContent=p.dry_run?'Start dry-run action':p.mode==='resend'?'Resend these eligible notices':'Re-process these current notices';el('start-replay').style.display='inline-block';}}catch(e){show('replay-preview',e.message)}}
-async function startReplay(){if(!previewToken)return;try{await api('replay',{token:previewToken});previewToken=null;el('start-replay').style.display='none';await refreshJob()}catch(e){show('replay-job',e.message)}}
+function invalidatePreview(){
+  previewGeneration++;
+  previewToken=null;
+  el('start-replay').style.display='none';
+  show('replay-preview','Create a new preview for this selection');
+}
+async function previewReplay(){
+  const generation=++previewGeneration;
+  previewToken=null;
+  el('start-replay').style.display='none';
+  show('replay-preview','Preparing preview…');
+  try{
+    const p=await api('preview',{source:el('replay-source').value,mode:el('replay-mode').value});
+    if(generation!==previewGeneration)return;
+    const target=el('replay-preview');
+    target.replaceChildren();
+    appendText(target,'p',p.mode+' '+p.source+' · '+p.notices+' eligible notices · '+p.parts+' message parts');
+    show('replay-mode-warning',p.dry_run
+      ?'Dry Run is enabled: this action will simulate delivery. No radio messages will be sent. Disable Dry Run in General settings, then create a new preview to transmit.'
+      :'Live delivery: eligible notices will be queued for the configured companion.');
+    for(const e of p.errors)appendText(target,'p','Cannot proceed: '+e);
+    for(const item of p.details){
+      const detail=appendText(target,'details','');
+      appendText(detail,'summary',item.source.toUpperCase()+': '+item.title+' ('+item.parts+' parts)');
+      const text=appendText(detail,'pre',item.text.split(' || ').join('\n'));
+      text.style.whiteSpace='pre-wrap';
+    }
+    if(p.mode==='resend' && p.notices===0){
+      appendText(target,'p','Nothing to resend: no current notices meet the saved settings. Review service settings or poll for fresh notices.');
+      return;
+    }
+    if(!p.errors.length){
+      previewToken=p.token;
+      el('start-replay').textContent=p.dry_run?'Start simulation — no transmission':p.mode==='resend'?'Resend these notices live':'Re-process these current notices';
+      el('start-replay').disabled=false;
+      el('start-replay').style.display='inline-block';
+    }
+  }catch(e){if(generation===previewGeneration)show('replay-preview',e.message)}
+}
+async function startReplay(){
+  if(!previewToken || replayStarting)return;
+  replayStarting=true;
+  el('start-replay').disabled=true;
+  const token=previewToken;
+  try{
+    await api('replay',{token});
+    previewToken=null;
+    el('start-replay').style.display='none';
+    await refreshJob();
+  }catch(e){
+    invalidatePreview();
+    show('replay-job',e.message);
+  }finally{replayStarting=false;el('start-replay').disabled=false}
+}
 async function pollSource(source){try{await api('poll/'+source,{});await refreshJob()}catch(e){show('replay-job',e.message)}}
 async function cancelJob(){try{await api('cancel',{});await refreshJob()}catch(e){show('replay-job',e.message)}}
-async function refreshJob(){try{const j=await api('job');show('replay-job',j.status==='idle'?'No troubleshooting job yet':j.mode+' '+j.source+': '+j.status+' · '+j.processed+'/'+j.total+' processed · '+JSON.stringify(j.results)+(j.cancel_requested?' · Cancellation requested':'')+(j.error?' · '+j.error:''));}catch(e){show('replay-job',e.message)}}
+async function refreshJob(){
+  try{
+    const j=await api('job');
+    if(j.status==='idle'){show('replay-job','No troubleshooting job yet');return}
+    const simulated=j.dry_run===true || Boolean(j.results && j.results['dry-run']);
+    const delivery=j.mode==='poll'?'':simulated
+      ?' · DRY RUN: no radio messages were sent'
+      :' · Live delivery: '+((j.results && j.results.success)||0)+' notices confirmed by the radio';
+    show('replay-job',j.mode+' '+j.source+': '+j.status+' · '+j.processed+'/'+j.total+' processed'+delivery+' · '+JSON.stringify(j.results)+(j.cancel_requested?' · Cancellation requested':'')+(j.error?' · '+j.error:''));
+  }catch(e){show('replay-job',e.message)}
+}
+
 function resetLogs(){logGeneration++;logCursor=0;logLines=[];show('live-logs','')}
 function toggleLogs(){logPaused=!logPaused;el('log-pause').textContent=logPaused?'Resume':'Pause'}
 async function refreshLogs(){if(logPaused||logsBusy)return;logsBusy=true;const generation=logGeneration;const params=new URLSearchParams({after:logCursor,service:el('log-service').value,level:el('log-level').value,search:el('log-search').value});el('log-download').href='/troubleshoot/logs/download?'+params.toString();try{const data=await api('logs?'+params);if(generation!==logGeneration)return;logCursor=data.cursor;logLines.push(...data.rows.map(r=>local(r.ts)+' '+r.level+' '+r.service+' '+r.message));logLines=logLines.slice(-1000);const box=el('live-logs');const follow=box.scrollTop+box.clientHeight>=box.scrollHeight-30;box.textContent=logLines.join('\n');if(follow)box.scrollTop=box.scrollHeight;show('log-status',data.truncated?'Earlier records have rolled out of the bounded buffer':'Live capture active');}catch(e){show('log-status',e.message)}finally{logsBusy=false}}

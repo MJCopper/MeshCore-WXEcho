@@ -219,7 +219,7 @@ class Troubleshooting:
         self.previews.pop(token)
         self.job = dict(id=secrets.token_hex(8),status='running',mode=preview['mode'],source=preview['source'],
                         started=utc(),finished='',cancel_requested=False,processed=0,total=preview['notices'],
-                        results={},error='',history_ids=[],history_start=rows(self.app.state.db,'SELECT COALESCE(MAX(id),0) AS id FROM service_history')[0]['id'])
+                        results={},error='',dry_run=preview['dry_run'],history_ids=[],history_start=rows(self.app.state.db,'SELECT COALESCE(MAX(id),0) AS id FROM service_history')[0]['id'])
         self.save()
         self.task = asyncio.create_task(self.run(preview))
         return self.job
