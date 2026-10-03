@@ -50,7 +50,7 @@ def test_oversized_verification_is_reported_without_queueing():
             self.events.append((level, detail))
 
     class Tx:
-        message_budget = 126
+        message_budget = 100
 
         def enqueue_verification(self, *args, **kwargs):
             raise AssertionError("oversized verification must not be queued")
@@ -58,8 +58,10 @@ def test_oversized_verification_is_reported_without_queueing():
     db = Db()
     poller = BomPoller(db, Tx())
     poller._queue_verification(0, dry_run=False)
-    assert len(FINAL_VERIFICATION_MESSAGE.encode()) == 134
-    assert len(FINAL_VERIFICATION_MESSAGE.encode()) > 126
+    poller._queue_verification(0, dry_run=False)
+    assert len(db.errors) == 1
+    assert len(FINAL_VERIFICATION_MESSAGE.encode()) <= 126
+    assert len(FINAL_VERIFICATION_MESSAGE.encode()) > 100
     assert db.errors and "exceeds MeshCore limit" in db.errors[0][1]
 
 

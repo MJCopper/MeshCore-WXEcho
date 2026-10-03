@@ -127,8 +127,8 @@ MESHCORE_MAX_NAME_BYTES = 32
 # Safe while the companion is offline; the live budget uses its actual name.
 MAX_PAYLOAD_BYTES = MESHCORE_CHANNEL_TEXT_BYTES - MESHCORE_MAX_NAME_BYTES - 2
 FINAL_VERIFICATION_MESSAGE = (
-    "UNOFFICIAL automated relay. May be INCORRECT or INCOMPLETE. "
-    "VERIFY independently. NEVER make a safety decision based on these notices."
+    "UNOFFICIAL relay. May be incorrect or incomplete. Verify independently. "
+    "Never base safety decisions on these notices."
 )
 
 VERIFICATION_INTERVAL_SECONDS = 300

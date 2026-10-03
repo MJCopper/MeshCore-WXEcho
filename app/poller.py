@@ -23,7 +23,7 @@ from .config import (
 from .dedupe import Decision, decide
 from .delivery import permanently_unsendable, queue_refusal, record_part, remaining_parts, submit_notice
 from .filters import FilterRules, should_include
-from .formatter import build_mesh_parts, frame_notice, marine_notice_sections
+from .formatter import build_mesh_parts, frame_notice, marine_notice_sections, bom_notice_sections
 from .models import Alert
 from .rfs.feed import council_key
 from .traffic.feed import TrafficClient, prepare_councils
@@ -293,9 +293,9 @@ class BomPoller:
             body_parts = [_format_cancel(alert, tz_name)]
             action = "CANCELLED"
         else:
-            action = "UPDATE" if decision.disposition == "update" else "NEW"
-            if alert.warning_sections:
-                body_parts = marine_notice_sections(alert, tz_name, action)
+            action = "UPDATE" if decision.disposition == "update" or (latest is not None and (latest["revision_hash"].partition(":")[0] != alert.revision_hash() or latest["disposition"] == "update")) else "NEW"
+            if alert.warning_sections or re.search(r"\bCANCELLED\b", alert.warning_summary or alert.detail or "", re.I):
+                body_parts = bom_notice_sections(alert, tz_name, action)
             else:
                 body_parts = build_mesh_parts(alert, tz_name, max_bytes=budget, split=False)
                 if body_parts:
@@ -323,7 +323,11 @@ class BomPoller:
                           and latest["revision_hash"] == revision_hash
                           and latest["transmitted_text"] == logged_text
                           and latest["transmit_status"] in ("failed", "interrupted", "deferred"))
-        if (force and decision.transmit and not retry_existing) or latest is None or latest["revision_hash"] != revision_hash or (
+        refreshed_preview = bool(dry_run and decision.transmit and latest is not None
+                                 and latest["transmit_status"] == "dry-run"
+                                 and latest["revision_hash"] == revision_hash
+                                 and latest["transmitted_text"] != logged_text)
+        if refreshed_preview or (force and decision.transmit and not retry_existing) or latest is None or latest["revision_hash"] != revision_hash or (
                 decision.transmit and not dry_run and not retry_existing
                 and latest["transmit_status"] in ("failed", "interrupted", "deferred")):
             detail = decision.detail + area_detail
@@ -332,8 +336,8 @@ class BomPoller:
             if decision.transmit and dry_run:
                 detail = f"DRY-RUN: {decision.detail}{area_detail}"
                 transmit_status = "dry-run"
-            disposition = decision.disposition
-            if latest is not None and disposition == "sent":
+            disposition = latest["disposition"] if refreshed_preview else decision.disposition
+            if not refreshed_preview and latest is not None and disposition == "sent":
                 disposition = "update"
             history_id = self._db.add_history(
                 alert.alert_id, alert.event, alert.area_desc, disposition,
@@ -442,10 +446,14 @@ class BomPoller:
         budget = getattr(self._tx, "message_budget", MAX_PAYLOAD_BYTES)
         length = len(FINAL_VERIFICATION_MESSAGE.encode("utf-8"))
         if length > budget:
-            detail = f"verification message exceeds MeshCore limit ({length} > {budget} bytes)"
-            self._db.add_error("broadcast", detail)
-            self._db.add_event("WARN", detail)
+            signature = (len(FINAL_VERIFICATION_MESSAGE.encode()), budget)
+            if getattr(self, "_verification_budget_error", None) != signature:
+                self._verification_budget_error = signature
+                detail = f"verification message exceeds MeshCore limit ({length} > {budget} bytes)"
+                self._db.add_error("broadcast", detail)
+                self._db.add_event("WARN", detail)
             return
+        self._verification_budget_error = None
         key = "verification_dry_run_last_ts" if dry_run else "verification_live_last_ts"
         timestamps = self._db.get_setting(key, {}) or {}
         last = timestamps.get(str(channel), "")

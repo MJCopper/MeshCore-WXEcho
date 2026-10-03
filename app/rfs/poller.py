@@ -234,8 +234,12 @@ class RFSPoller:
     def _queue_verification(self, dry_run: bool):
         budget = getattr(self.tx, "message_budget", MAX_PAYLOAD_BYTES)
         if len(FINAL_VERIFICATION_MESSAGE.encode()) > budget:
-            self.db.add_error("rfs", f"verification message exceeds MeshCore limit ({budget} bytes)")
+            signature = (len(FINAL_VERIFICATION_MESSAGE.encode()), budget)
+            if getattr(self, "_verification_budget_error", None) != signature:
+                self._verification_budget_error = signature
+                self.db.add_error("rfs", f"verification message exceeds MeshCore limit ({budget} bytes)")
             return
+        self._verification_budget_error = None
         if dry_run:
             return
         key = "verification_live_last_ts"

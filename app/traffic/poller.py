@@ -326,8 +326,12 @@ class TrafficPoller:
     def _queue_verification(self):
         budget = getattr(self.tx, "message_budget", MAX_PAYLOAD_BYTES)
         if len(FINAL_VERIFICATION_MESSAGE.encode()) > budget:
-            self.db.add_error("traffic", "verification message exceeds MeshCore limit")
+            signature = (len(FINAL_VERIFICATION_MESSAGE.encode()), budget)
+            if getattr(self, "_verification_budget_error", None) != signature:
+                self._verification_budget_error = signature
+                self.db.add_error("traffic", "verification message exceeds MeshCore limit")
             return
+        self._verification_budget_error = None
         key = "verification_live_last_ts"
         saved = self.db.get_setting(key, {}) or {}
         channel = str(self.db.get_setting("meshcore_channel", 0))

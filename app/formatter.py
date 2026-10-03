@@ -174,13 +174,12 @@ def _split_plain(message: str, budget: int) -> list[str]:
         if _byte_len(candidate) <= budget:
             current = candidate
             continue
-        if current:
-            chunks.append(current)
-            current = ""
         if _byte_len(clause) <= budget:
+            if current:
+                chunks.append(current)
             current = clause
             continue
-        for word in clause.split():
+        for word in re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+[,:;.]*|\S+", clause):
             candidate = f"{current} {word}" if current else word
             if _byte_len(candidate) <= budget:
                 current = candidate
@@ -243,7 +242,9 @@ def frame_notice(source: str, action: str, topic: str, sections: list,
     estimate = 1
     for _ in range(30):
         output = []
+        prefixes = []
         for body in bodies:
+            body_start = len(output)
             remaining = " ".join(body.split())
             while remaining:
                 index = len(output) + 1
@@ -255,7 +256,23 @@ def frame_notice(source: str, action: str, topic: str, sections: list,
                 room = max_bytes - _byte_len(prefix)
                 chunk = _split_plain(remaining, room)[0]
                 output.append(prefix + chunk)
+                prefixes.append(prefix)
                 remaining = remaining[len(chunk):].lstrip()
+            # Balance a tiny tail within its own section; never mix cancellation/active sections.
+            if len(output) - body_start >= 2:
+                previous = output[-2][len(prefixes[-2]):]
+                tail = output[-1][len(prefixes[-1]):]
+                if _byte_len(tail) < 35:
+                    words = re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+[,:;.]*|\S+", previous)
+                    while len(words) > 1 and _byte_len(tail) < 50:
+                        candidate = words[-1] + " " + tail
+                        shorter = " ".join(words[:-1])
+                        if _byte_len(shorter) < 35 or _byte_len(prefixes[-1] + candidate) > max_bytes:
+                            break
+                        words.pop()
+                        previous, tail = shorter, candidate
+                    output[-2] = prefixes[-2] + previous
+                    output[-1] = prefixes[-1] + tail
         if len(output) == estimate:
             if any(_byte_len(part) > max_bytes for part in output):
                 raise ValueError("MeshCore notice part exceeds byte budget")
@@ -283,6 +300,33 @@ def marine_notice_sections(alert, tz_name: str, action: str = "NEW") -> list[tup
         section_topic = (alert.event if cancelled else section.phenomenon) + day
         out.append((section_action, section_topic, f"for {section.areas.strip()}"))
     return out
+
+
+def bom_notice_sections(alert, tz_name: str, action: str):
+    """Lead with explicit cancellation sections without cancelling active coverage."""
+    if alert.warning_sections:
+        sections = marine_notice_sections(alert, tz_name, action)
+        if any(part_action == "CANCELLED" for part_action, _, _ in sections):
+            cancelled = [(action, alert.event, "CANCELLED — " + topic + " " + content)
+                         for part_action, topic, content in sections if part_action == "CANCELLED"]
+            active = [(action, alert.event, "ACTIVE WARNING — " + topic + " " + content)
+                      for part_action, topic, content in sections if part_action != "CANCELLED"]
+            return cancelled + active
+        return sections
+    summary = alert.warning_summary or " ".join(unescape(re.sub(r"<[^>]*>", " ", alert.detail or "")).split())
+    # Extract complete provider cancellation sentences, preserving their scope verbatim.
+    sentences = re.split(r"(?<=[.!?])\s+", summary)
+    cancellations = [sentence for sentence in sentences if re.search(r"\b(?:the|this) warning(?: for .+?)? (?:is|has been) CANCELLED\b", sentence, re.I)]
+    if not cancellations:
+        return build_mesh_parts(alert, tz_name, split=False)
+    from dataclasses import replace
+    active_summary = " ".join(sentence for sentence in sentences if sentence not in cancellations)
+    active = replace(alert, warning_summary=active_summary, detail="")
+    content = build_mesh_parts(active, tz_name, split=False)[0]
+    if content.startswith(alert.event):
+        content = content[len(alert.event):].lstrip()
+    return [(action, alert.event, "CANCELLED — " + re.sub(r",?\s+and the warning for (?:this|that|these|those) (?:districts?|areas?) is CANCELLED[.!]?$", ".", sentence, flags=re.I)) for sentence in cancellations] + [
+        (action, alert.event, "ACTIVE WARNING — " + content)]
 
 
 def build_mesh_text(alert, tz_name: str = "Australia/Sydney",
@@ -334,10 +378,14 @@ def build_mesh_parts(alert, tz_name: str = "Australia/Sydney",
         summary = " ".join(unescape(re.sub(r"<[^>]*>", " ",
                                          getattr(alert, "detail", "") or "")).split())
     if locations and summary:
-        repeated = re.match(r"^Locations which may be affected include (.+?)(?:\.\s*|$)",
-                            summary, flags=re.I)
-        if repeated and repeated.group(1).strip().casefold() == locations.strip().casefold():
-            summary = summary[repeated.end():].strip()
+        def names(value):
+            return {re.sub(r"\s+", " ", name).strip().casefold()
+                    for name in re.split(r",\s*|\s+and\s+", value) if name.strip()}
+        def remove_repeated(match):
+            return "" if names(match.group(1)) == names(locations) else match.group(0)
+        summary = re.sub(r"Locations which may be affected include (.+?)(?:\.\s*|$)",
+                         remove_repeated, summary, flags=re.I)
+        summary = " ".join(summary.split()).strip(" ;")
     if locations and summary:
         when = _format_when(alert.onset, alert.ends, tz_name)
         intro = f"{alert.event} for {locations}"

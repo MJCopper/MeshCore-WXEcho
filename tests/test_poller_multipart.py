@@ -334,7 +334,7 @@ async def test_marine_api_area_change_is_new_revision_without_rss_change(monkeyp
     assert len(db.history_rows) == 2
     assert db.history_rows[0]["revision_hash"] != db.history_rows[1]["revision_hash"]
     assert "Sydney Coast" in db.history_rows[1]["transmitted_text"]
-    assert "CANCELLED Marine Wind Warning" in db.history_rows[1]["transmitted_text"]
+    assert "CANCELLED — Marine Wind Warning" in db.history_rows[1]["transmitted_text"]
     assert "Marine Wind Warning for Batemans Coast" in db.history_rows[1]["transmitted_text"]
     assert "Batemans Coast" in db.history_rows[1]["transmitted_text"]
     assert tx.enqueued == []
@@ -352,8 +352,9 @@ async def test_existing_dry_run_revision_refreshes_prepared_wording(monkeypatch)
     monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz, **kwargs: ["Wednesday: warning"])
     await poller._process(item, rules, "Australia/Sydney", 0, dry_run=True)
 
-    assert len(db.history_rows) == 1
-    assert "Wednesday: warning" in db.history_rows[0]["transmitted_text"]
+    assert len(db.history_rows) == 2
+    assert "Wed: warning" in db.history_rows[0]["transmitted_text"]
+    assert "Wednesday: warning" in db.history_rows[1]["transmitted_text"]
 
 
 def test_verification_success_starts_persistent_five_minute_cooldown():

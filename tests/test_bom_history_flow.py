@@ -65,7 +65,7 @@ async def test_fixed_link_revisions_reach_history_and_dashboard(tmp_path, monkey
     assert len(db.query_history()) == 1
     await poller.poll_once()
     footers = [row["message"] for row in db.recent_events(100)
-               if "[DRY-RUN] would send: UNOFFICIAL automated relay" in row["message"]]
+               if "[DRY-RUN] would send: UNOFFICIAL relay" in row["message"]]
     assert len(footers) == 1
     rows = db.query_history()
     assert len(rows) == 2
@@ -113,5 +113,5 @@ async def test_dry_run_verification_follows_all_alerts_in_poll(tmp_path, monkeyp
     assert len(messages) == 3
     assert "Hunter" in messages[0]
     assert "Sydney" in messages[1]
-    assert "UNOFFICIAL automated relay" in messages[2]
+    assert "UNOFFICIAL relay" in messages[2]
     db.close()

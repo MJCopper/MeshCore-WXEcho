@@ -81,10 +81,10 @@ def test_build_mesh_parts_splits_enriched_alert_with_markers_and_byte_caps():
 
 def test_final_verification_payload_is_exact_and_within_byte_cap():
     assert FINAL_VERIFICATION_MESSAGE == (
-        "UNOFFICIAL automated relay. May be INCORRECT or INCOMPLETE. "
-        "VERIFY independently. NEVER make a safety decision based on these notices."
+        "UNOFFICIAL relay. May be incorrect or incomplete. Verify independently. "
+        "Never base safety decisions on these notices."
     )
-    assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) > MAX_PAYLOAD_BYTES
+    assert len(FINAL_VERIFICATION_MESSAGE.encode("utf-8")) <= MAX_PAYLOAD_BYTES
 
 
 def test_marine_warning_sections_keep_cancellations_distinct():

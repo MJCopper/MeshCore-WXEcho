@@ -118,3 +118,63 @@ def test_first_part_only_context_preserves_unicode_content_and_large_numbering()
     assert text.count("café") == 100
     assert all(f"Location {i}:" in text for i in range(100))
     assert parts[-1].endswith("check livetraffic.com")
+
+
+def test_bom_removes_repeated_location_sentence_after_hazard_description():
+    alert = Alert("repeat", "Severe Thunderstorm Warning", "", "NSW", "", "", "Alert",
+                  specific_locations="Orange, Goulburn, Dubbo, Nowra, Bowral and Bathurst",
+                  warning_summary="Damaging winds and heavy rainfall. Locations which may be affected include Orange, Goulburn, Dubbo, Nowra, Bowral and Bathurst.")
+    text = " ".join(build_mesh_parts(alert, split=False))
+    assert text.count("Orange") == 1
+    assert "Damaging winds and heavy rainfall" in text
+
+
+def test_bom_preserves_additional_locations_and_qualified_lists():
+    alert = Alert("additional", "Flood Warning", "", "NSW", "", "", "Alert",
+                  specific_locations="Orange", warning_summary="Heavy rainfall. Locations which may be affected include Orange and Goulburn.")
+    assert "Goulburn" in " ".join(build_mesh_parts(alert, split=False))
+
+
+def test_mixed_thunderstorm_cancellation_leads_with_affected_scope():
+    from app.formatter import bom_notice_sections
+    alert = Alert("mixed", "Severe Thunderstorm Warning", "", "NSW", "", "", "Alert",
+                  specific_locations="Orange, Parkes, Blayney, Trunkey Creek and Taralga",
+                  warning_summary="Damaging winds are likely. Locations which may be affected include Orange, Parkes, Blayney, Trunkey Creek and Taralga. Severe thunderstorms are no longer occurring in the Snowy Mountains and Australian Capital Territory districts and the warning for these districts is CANCELLED.")
+    sections = bom_notice_sections(alert, "Australia/Sydney", "UPDATE")
+    parts = frame_notice("BOM", "UPDATE", alert.event, sections, "check bom.gov.au", 126, alert.alert_id)
+    text = " ".join(parts)
+    assert "CANCELLED —" in parts[0]
+    assert text.count("CANCELLED") == 1
+    assert "ACTIVE WARNING —" in text
+    assert text.index("Snowy Mountains") < text.index("Orange")
+    assert text.count("Orange") == 1
+    assert all(len(p.encode()) <= 126 for p in parts)
+    assert not any(p.endswith("Blayney,") and len(p.encode()) < 30 for p in parts)
+
+
+def test_long_clause_fills_a_short_preceding_location_remainder():
+    from app.formatter import _split_plain
+    parts = _split_plain("Blayney, Trunkey Creek and Taralga. " + "Damaging winds and heavy rainfall " * 5, 126)
+    assert parts[0] != "Blayney,"
+    assert len(parts[0].encode()) > 80
+    assert all(len(p.encode()) <= 126 for p in parts)
+
+
+def test_negated_cancellation_is_not_promoted_to_cancelled_section():
+    from app.formatter import bom_notice_sections
+    alert = Alert("not-cancelled", "Flood Warning", "", "NSW", "", "", "Alert",
+                  specific_locations="Hunter", warning_summary="This warning is not CANCELLED.")
+    sections = bom_notice_sections(alert, "Australia/Sydney", "UPDATE")
+    assert all(not isinstance(section, tuple) for section in sections)
+    assert "not CANCELLED" in sections[0]
+
+
+def test_singular_district_cancellation_has_no_trailing_cancelled_status():
+    from app.formatter import bom_notice_sections
+    alert = Alert("single-cancel", "Severe Thunderstorm Warning", "", "NSW", "", "", "Alert",
+                  specific_locations="Orange", warning_summary="Damaging winds. Severe thunderstorms are no longer occurring in the South West Slopes district and the warning for this district is CANCELLED")
+    parts = frame_notice("BOM","UPDATE",alert.event,bom_notice_sections(alert,"Australia/Sydney","UPDATE"),"check bom.gov.au",126,alert.alert_id)
+    assert "CANCELLED —" in parts[0]
+    assert " ".join(parts).count("CANCELLED") == 1
+    assert any("South West Slopes" in p for p in parts)
+    assert all(len(p.encode())<=126 for p in parts)
