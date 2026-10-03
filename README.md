@@ -1,12 +1,12 @@
 # ⚠️ WARNING: UNOFFICIAL PERSONAL PROJECT — DO NOT RELY ON IT
 
-> **This is an unofficial personal project. It is not suitable for serious, emergency, or safety-critical use. Do not trust any of its inputs or outputs.** Incoming data, settings, displayed warnings, and transmitted messages may be wrong, incomplete, delayed, or missing. Verify information independently using official Bureau of Meteorology and local emergency sources. Never make a safety decision based on WXEcho.
+> **This is an unofficial personal project. It is not suitable for serious, emergency, or safety-critical use. Do not trust any of its inputs or outputs.** Incoming data, settings, displayed warnings, and transmitted messages may be wrong, incomplete, delayed, or missing. Verify information independently using official Bureau of Meteorology and local emergency sources. Never make a safety decision based on NoticeEcho.
 
 ---
 
-# MeshCore WXEcho
+# Meshcore NoticeEcho
 
-WXEcho polls the NSW Bureau of Meteorology warning RSS feed, NSW RFS incident data and public Live Traffic NSW GeoJSON feeds, then broadcasts selected notices over a MeshCore radio. It is a small self-hosted web app for a Raspberry Pi, Linux host, Windows machine, or Docker.
+NoticeEcho polls the NSW Bureau of Meteorology warning RSS feed, NSW RFS incident data and public Live Traffic NSW GeoJSON feeds, then broadcasts selected notices over a MeshCore radio. It is a small self-hosted web app for a Raspberry Pi, Linux host, Windows machine, or Docker.
 
 ## BOM current warnings
 
@@ -14,9 +14,9 @@ BOM, RFS and Live Traffic NSW each have their own enable control and polling int
 
 ## NSW RFS Fires Near Me
 
-WXEcho can monitor the official NSW RFS current-incidents GeoJSON feed as a separate source. Open **NSW RFS** to enable monitoring, choose one or more NSW council areas (or All NSW), and select alert levels. Emergency Warning and Watch and Act are selected initially; Advice is optional. The council filter applies to every level. No RFS messages are sent until monitoring and council coverage are selected. The global Dry Run setting also applies to RFS.
+NoticeEcho can monitor the official NSW RFS current-incidents GeoJSON feed as a separate source. Open **NSW RFS** to enable monitoring, choose one or more NSW council areas (or All NSW), and select alert levels. Emergency Warning and Watch and Act are selected initially; Advice is optional. The council filter applies to every level. No RFS messages are sent until monitoring and council coverage are selected. The global Dry Run setting also applies to RFS.
 
-RFS incidents have their own live view; BOM and RFS broadcast history appear together in History with a source filter. WXEcho checks the RFS feed at its configured interval (minimum 5 minutes); the RFS says incident data is updated every 30 minutes. Incident locations may be approximate. Source: © State of New South Wales (NSW Rural Fire Service). For current information go to [rfs.nsw.gov.au](https://www.rfs.nsw.gov.au/).
+RFS incidents have their own live view; BOM and RFS broadcast history appear together in History with a source filter. NoticeEcho checks the RFS feed at its configured interval (minimum 5 minutes); the RFS says incident data is updated every 30 minutes. Incident locations may be approximate. Source: © State of New South Wales (NSW Rural Fire Service). For current information go to [rfs.nsw.gov.au](https://www.rfs.nsw.gov.au/).
 
 ## Live Traffic NSW
 
@@ -34,7 +34,7 @@ Additional services register a stable source ID and label in `app/history.py`, t
 
 Automated notices from all services use one bounded radio queue. A multipart notice enters the queue as a complete group or waits for space; older queued parts are never evicted to admit new ones. Emergency Warning RFS notices have the highest priority, followed by BOM, other RFS notices, and Live Traffic NSW. The unofficial verification message remains after queued notices. An interrupted or failed notice is retried on a later successful poll if the source item remains current. Parts already confirmed by the local radio are not resent when the prepared text is unchanged.
 
-History shows each part's outcome and the time the local radio confirmed transmission. **Locally transmitted does not mean received by another node.** If the radio's transmission counter cannot be read, WXEcho records an unverified failure instead of claiming confirmation; a later poll can retry, so duplicate reception remains possible. Feed polling success and radio transmission status are separate. BOM and RFS send matching current items when enabled; Live Traffic NSW records items on its first live poll as a baseline to avoid a burst of existing traffic notices.
+History shows each part's outcome and the time the local radio confirmed transmission. **Locally transmitted does not mean received by another node.** If the radio's transmission counter cannot be read, NoticeEcho records an unverified failure instead of claiming confirmation; a later poll can retry, so duplicate reception remains possible. Feed polling success and radio transmission status are separate. BOM and RFS send matching current items when enabled; Live Traffic NSW records items on its first live poll as a baseline to avoid a burst of existing traffic notices.
 
 ## Broadcast content
 
@@ -47,7 +47,7 @@ BOM, NSW RFS and Live Traffic NSW notices use the same on-air framing: source, N
 - Configurable Australian IANA timezone display.
 - MeshCore over USB serial or TCP.
 - BOM warning filtering, update/cancellation handling, and deduplication.
-- MeshCore channel messages are limited to 160 bytes including the companion name and `: `; WXEcho uses the connected name to size text and splits long alerts before sending.
+- MeshCore channel messages are limited to 160 bytes including the companion name and `: `; NoticeEcho uses the connected name to size text and splits long alerts before sending.
 - Dry-run mode, history, transmit log, error log, and dashboard health status.
 
 ## Install
@@ -71,7 +71,7 @@ This stores test settings and history in the external Docker volume `wxecho-test
 
 ### Data persistence and backup
 
-Docker stores settings, shared service history, alert state, events and the transmit log in `data/wx-echo.db` on the host. `docker compose restart`, `stop`, `up` and container recreation retain this file. Keep the `data/` directory when moving or reinstalling WXEcho; a different checkout has a different `data/` directory.
+Docker stores settings, shared service history, alert state, events and the transmit log in `data/wx-echo.db` on the host. `docker compose restart`, `stop`, `up` and container recreation retain this file. Keep the `data/` directory when moving or reinstalling NoticeEcho; a different checkout has a different `data/` directory.
 
 After updating the application code, run `docker compose up -d --build` to rebuild and recreate the container. `docker compose restart` keeps the existing image and will not apply code changes.
 
@@ -107,7 +107,7 @@ The application uses BOM's public NSW warning RSS feed, including the warning li
 
 Recent warning revisions and the History page record each distinct BOM version received from the NSW feed, including warnings excluded by broadcast filters. An unchanged warning is not added again on every poll. The Events log records each dry-run attempt, so it can grow while History stays the same. The unofficial verification message is queued after warning parts and sent at most once per five minutes on the live channel; its last successful send time survives restarts. Dry-run shows the same five-minute cadence.
 
-The default broadcast policy includes all BOM warning products. Settings can instead select individual Australian warning products, plus additional products such as Flood Watch, Tropical Cyclone Advice, Road Weather Alert and Bush Walkers Weather Alert. Timestamped RSS titles and `Marine Wind Warning Summary` items are normalized before filtering; qualified flood products and numbered tropical cyclone products match their corresponding product selection. Council matching uses BOM warning polygons when supplied, or complete typed LGA names or explicitly administrative council names. Broad forecast districts, marine coasts, and incomplete location descriptions are marked unknown rather than treated as outside a selected council. Existing non-NSW current snapshots and rows with proven non-NSW provenance are removed on upgrade; older History without reliable source provenance is retained. For marine wind warnings whose RSS item contains only a statewide summary, WXEcho resolves the linked BOM product ID and reads the warning detail API. Strong Wind Warning areas and cancellations are sent as separately labelled parts. If detail is unavailable, it falls back to the RSS summary.
+The default broadcast policy includes all BOM warning products. Settings can instead select individual Australian warning products, plus additional products such as Flood Watch, Tropical Cyclone Advice, Road Weather Alert and Bush Walkers Weather Alert. Timestamped RSS titles and `Marine Wind Warning Summary` items are normalized before filtering; qualified flood products and numbered tropical cyclone products match their corresponding product selection. Council matching uses BOM warning polygons when supplied, or complete typed LGA names or explicitly administrative council names. Broad forecast districts, marine coasts, and incomplete location descriptions are marked unknown rather than treated as outside a selected council. Existing non-NSW current snapshots and rows with proven non-NSW provenance are removed on upgrade; older History without reliable source provenance is retained. For marine wind warnings whose RSS item contains only a statewide summary, NoticeEcho resolves the linked BOM product ID and reads the warning detail API. Strong Wind Warning areas and cancellations are sent as separately labelled parts. If detail is unavailable, it falls back to the RSS summary.
 
 ## Filtering, delivery and source health
 
@@ -128,7 +128,7 @@ The [Troubleshoot page](http://localhost:8110/troubleshoot) shows all source ser
 5. Leave dry-run enabled while checking the dashboard and history.
 6. Send a manual test before enabling live broadcasts.
 
-WXEcho retries a saved but disconnected radio in the background about every 15 seconds. A stable by-id path survives `/dev/ttyUSB*` renumbering after a replug; without one, reconnecting requires the saved device path to remain the same.
+NoticeEcho retries a saved but disconnected radio in the background about every 15 seconds. A stable by-id path survives `/dev/ttyUSB*` renumbering after a replug; without one, reconnecting requires the saved device path to remain the same.
 
 ### Companion settings
 
@@ -137,3 +137,17 @@ The MeshCore Settings page reads the saved radio's name, firmware, battery, TX p
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## NoticeEcho rename and compatibility
+
+The full product name is **Meshcore NoticeEcho**; the short name and Windows executable are **NoticeEcho**. New releases produce `NoticeEcho-windows-<version>.zip`; the canonical PyInstaller specification is `packaging/noticeecho.spec`. The old build specification remains compatible.
+
+Bootstrap configuration now accepts `NOTICE_ECHO_HOST`, `NOTICE_ECHO_PORT` and `NOTICE_ECHO_DB`. These take precedence over the supported `WX_ECHO_*` aliases and older `MESH_WX_*` variables. New native user-data directories use `NoticeEcho` (Windows/macOS) or `notice-echo` (Linux), and new databases use `notice-echo.db`. Existing WXEcho/MeshWX directories and database filenames are reused automatically; no rename or data copy is required.
+
+Compose retains its `wx-echo` service key for existing commands and override files. The container is now `notice-echo`. The test database stays in the existing external `wxecho-test-data` volume, and Compose retains `/data/wx-echo.db` explicitly. Do not create a replacement volume simply to change its name. Native installation uses `notice-echo.service` for fresh installs and retains an existing `wx-echo.service` on upgrade.
+
+The source checkout can be called `Meshcore-NoticeEcho`; repository hosting names and published releases are managed separately from the local rename. Runtime logger names and the existing persisted process-log filename remain compatible with earlier diagnostics.
+
+Installer configuration accepts `NOTICEECHO_REPO`, `NOTICEECHO_DIR` and `NOTICEECHO_NO_SELFUPDATE`, with precedence over the supported `WXECHO_*` and older installer aliases. Fresh one-line installs default to `/opt/NoticeEcho`; an existing `/opt/WXEcho` checkout is reused.
+
+The local Docker image is `noticeecho:local`. Release automation publishes `ghcr.io/<owner>/meshcore-noticeecho` and retains the repository-derived image tag for existing consumers. The hosted repository itself is not renamed by a local deployment.

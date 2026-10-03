@@ -867,7 +867,7 @@ async def clear_errors(request: Request):
 @router.post("/troubleshoot/test", response_class=HTMLResponse)
 async def send_test(request: Request):
     tx = _tx(request)
-    text = "WXEcho test message"
+    text = "NoticeEcho test message"
     ok = await tx.send_test(text)   # goes on each radio's TEST channel
     return render(
         request, "_manual_result.html", ok=ok,
@@ -880,7 +880,7 @@ async def send_test(request: Request):
 async def send_test_one(request: Request, name: str):
     tx = _tx(request)
     label = {t["name"]: t["label"] for t in tx.status()}.get(name, name)
-    text = "WXEcho test via %s" % label
+    text = "NoticeEcho test via %s" % label
     ok, err = await tx.send_to(name, text)
     return render(
         request, "_manual_result.html", ok=ok,

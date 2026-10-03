@@ -1,5 +1,5 @@
 # PyInstaller spec — NoticeEcho standalone (onedir) build.
-# Build from the repo root:   pyinstaller packaging/wxecho.spec
+# Build from the repo root:   pyinstaller packaging/noticeecho.spec
 # Produces dist/NoticeEcho/ containing NoticeEcho(.exe) plus everything it needs.
 import os
 from PyInstaller.utils.hooks import collect_all, collect_submodules

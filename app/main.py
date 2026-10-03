@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
     setup_logging()
     process_logs = ProcessLogs(Path(cfg.db_path).parent / "wxecho-process.jsonl" if cfg.db_path != ":memory:" else None)
     process_logs.install()
-    logger.info("starting wx-echo (db=%s)", cfg.db_path)
+    logger.info("starting NoticeEcho (db=%s)", cfg.db_path)
 
     db = Database(cfg.db_path)
     tx = TransmitManager(db)
@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        logger.info("shutting down wx-echo")
+        logger.info("shutting down NoticeEcho")
         liveness.stop()          # first: never force-exit during a clean shutdown
         beat_task.cancel()
         if not startup_task.done():
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="wx-echo", lifespan=lifespan)
+    app = FastAPI(title="Meshcore NoticeEcho", lifespan=lifespan)
     app.include_router(router)
     app.include_router(rfs_router)
     app.include_router(traffic_router)

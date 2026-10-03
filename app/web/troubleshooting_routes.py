@@ -108,7 +108,7 @@ async def logs(request: Request, after: int = Query(0,ge=0), service: str = '', 
 async def download_logs(request: Request, service: str = '', level: str = '', search: str = ''):
     data=request.app.state.process_logs.query(0,service,level,search)
     return PlainTextResponse('\n'.join(json.dumps(row) for row in data['rows']),
-                             headers={'Content-Disposition':'attachment; filename="wxecho-logs.jsonl"'})
+                             headers={'Content-Disposition':'attachment; filename="noticeecho-logs.jsonl"'})
 
 
 @router.get('/bundle')
@@ -117,4 +117,4 @@ async def bundle(request: Request):
               settings=redact(request.app.state.db.all_settings()),
               logs=request.app.state.process_logs.query(),job=manager(request).job)
     return Response(json.dumps(redact(data),indent=2),media_type='application/json',
-                    headers={'Content-Disposition':'attachment; filename="wxecho-diagnostics.json"'})
+                    headers={'Content-Disposition':'attachment; filename="noticeecho-diagnostics.json"'})

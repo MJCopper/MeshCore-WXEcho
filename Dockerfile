@@ -1,10 +1,11 @@
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.title="Meshcore NoticeEcho" \
+      org.opencontainers.image.description="BOM, NSW RFS and Traffic notices over MeshCore"
+
 # MeshCore/pyserial need no build tools at runtime; keep the image lean.
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    WX_ECHO_DB=/data/wx-echo.db \
-    WX_ECHO_PORT=8000
+    PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 

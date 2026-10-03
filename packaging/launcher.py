@@ -1,6 +1,6 @@
 """Desktop launcher for the packaged (PyInstaller) builds.
 
-Starts the WXEcho web server and opens the dashboard in the default browser.
+Starts the NoticeEcho web server and opens the dashboard in the default browser.
 Used as the entry point for the Windows/Linux standalone bundles; the Docker
 image and `python -m app.main` path do NOT use this.
 """
@@ -18,17 +18,11 @@ def _legacy_env_name(name: str) -> str:
 
 
 def _env_with_legacy(name: str, default: str) -> str:
-    val = os.environ.get(name)
-    if val is not None:
-        return val
-    legacy = _legacy_env_name(name)
-    legacy_val = os.environ.get(legacy)
-    if legacy_val is not None:
-        print(f"warning: {legacy} is deprecated; use {name} instead.", file=sys.stderr)
-        os.environ[name] = legacy_val
-        return legacy_val
-    os.environ.setdefault(name, default)
-    return os.environ[name]
+    from app.config import _env_with_legacy as read_env
+    canonical = name.replace("WX_ECHO", "NOTICE_ECHO", 1)
+    value = read_env(name, default)
+    os.environ[canonical] = value
+    return value
 
 
 def _open_browser(host: str, port: int, url: str) -> None:
@@ -54,9 +48,9 @@ def main() -> None:
     browse_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     url = f"http://{browse_host}:{port}"
     print("=" * 60)
-    print(f"  WXEcho is starting - your browser will open at {url}")
+    print(f"  NoticeEcho is starting - your browser will open at {url}")
     print("  (first launch can take a few seconds)")
-    print("  Keep this window open. Close it to stop WXEcho.")
+    print("  Keep this window open. Close it to stop NoticeEcho.")
     print("=" * 60)
     threading.Thread(target=_open_browser, args=(browse_host, int(port), url),
                      daemon=True).start()

@@ -11,7 +11,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
-APP_DIRNAME = "WXEcho"
+APP_DIRNAME = "NoticeEcho"
 LEGACY_APP_DIRNAME = "".join(["Mesh", "WX"])
 LEGACY_LINUX_DIRNAME = "".join(["mesh", "-wx"])
 LEGACY_DB_NAME = "".join(["mesh", "-wx", ".db"])
@@ -22,69 +22,32 @@ def _legacy_env_name(name: str) -> str:
 
 
 def _env_with_legacy(name: str, default: str | None = None) -> str | None:
-    val = os.environ.get(name)
-    if val is not None:
-        return val
-    legacy = _legacy_env_name(name)
-    legacy_val = os.environ.get(legacy)
-    if legacy_val is not None:
-        warnings.warn(
-            f"{legacy} is deprecated; use {name} instead.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return legacy_val
+    """NoticeEcho variables take precedence; both older prefixes remain accepted."""
+    canonical = name.replace("WX_ECHO", "NOTICE_ECHO", 1)
+    for candidate in (canonical, name, _legacy_env_name(name)):
+        if candidate in os.environ:
+            if candidate == _legacy_env_name(name):
+                warnings.warn(f"{candidate} is deprecated; use {canonical} instead.",
+                              RuntimeWarning, stacklevel=2)
+            return os.environ[candidate]
     return default
 
 
 def default_data_dir() -> Path:
-    """Per-OS location for the database and other runtime state.
-
-    Chosen so the app runs unprivileged out-of-the-box on every platform:
-      * Docker/Linux containers .......... /data   (if it exists and is writable)
-      * Windows .......................... %LOCALAPPDATA%\\WXEcho
-      * macOS ............................ ~/Library/Application Support/WXEcho
-      * Linux/Raspberry Pi (native) ...... $XDG_DATA_HOME/wx-echo  (~/.local/share/wx-echo)
-    """
-    # Honour the container convention when /data is mounted.
+    """Choose a new NoticeEcho directory, reusing existing installation storage."""
     if os.path.isdir("/data") and os.access("/data", os.W_OK):
         return Path("/data")
-
     if sys.platform.startswith("win"):
-        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") \
-            or str(Path.home() / "AppData" / "Local")
-        new_dir = Path(base) / APP_DIRNAME
-        legacy_dir = Path(base) / LEGACY_APP_DIRNAME
-        if legacy_dir.exists() and not new_dir.exists():
-            warnings.warn(
-                f"Using legacy data directory '{legacy_dir}'. Move to '{new_dir}' when convenient.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            return legacy_dir
-        return new_dir
-    if sys.platform == "darwin":
-        new_dir = Path.home() / "Library" / "Application Support" / APP_DIRNAME
-        legacy_dir = Path.home() / "Library" / "Application Support" / LEGACY_APP_DIRNAME
-        if legacy_dir.exists() and not new_dir.exists():
-            warnings.warn(
-                f"Using legacy data directory '{legacy_dir}'. Move to '{new_dir}' when convenient.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            return legacy_dir
-        return new_dir
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    new_dir = Path(base) / "wx-echo"
-    legacy_dir = Path(base) / LEGACY_LINUX_DIRNAME
-    if legacy_dir.exists() and not new_dir.exists():
-        warnings.warn(
-            f"Using legacy data directory '{legacy_dir}'. Move to '{new_dir}' when convenient.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return legacy_dir
-    return new_dir
+        base = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+                    or str(Path.home() / "AppData" / "Local"))
+        candidates = [base / "NoticeEcho", base / "WXEcho", base / LEGACY_APP_DIRNAME]
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+        candidates = [base / "NoticeEcho", base / "WXEcho", base / LEGACY_APP_DIRNAME]
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share"))
+        candidates = [base / "notice-echo", base / "wx-echo", base / LEGACY_LINUX_DIRNAME]
+    return next((path for path in candidates if path.exists()), candidates[0])
 
 
 @dataclass(frozen=True)
@@ -98,17 +61,8 @@ def load_bootstrap() -> BootstrapConfig:
     db_path = _env_with_legacy("WX_ECHO_DB")
     if not db_path:
         data_dir = default_data_dir()
-        new_db = data_dir / "wx-echo.db"
-        legacy_db = data_dir / LEGACY_DB_NAME
-        if legacy_db.exists() and not new_db.exists():
-            warnings.warn(
-                f"Using legacy database path '{legacy_db}'. Move to '{new_db}' when convenient.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            db_path = str(legacy_db)
-        else:
-            db_path = str(new_db)
+        candidates = [data_dir / "notice-echo.db", data_dir / "wx-echo.db", data_dir / LEGACY_DB_NAME]
+        db_path = str(next((path for path in candidates if path.is_file()), candidates[0]))
     # Make sure the parent directory exists so SQLite can create the file.
     parent = Path(db_path).expanduser().parent
     parent.mkdir(parents=True, exist_ok=True)

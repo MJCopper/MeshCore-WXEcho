@@ -13,7 +13,7 @@ Group=dialout
 WorkingDirectory=__DIR__
 Environment=NOTICE_ECHO_HOST=0.0.0.0
 Environment=NOTICE_ECHO_PORT=8110
-Environment=NOTICE_ECHO_DB=__DIR__/data/wx-echo.db
+Environment=NOTICE_ECHO_DB=__DIR__/data/__DB__
 ExecStart=__DIR__/.venv/bin/python -m app.main
 Restart=on-failure
 RestartSec=5
