@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 from ..config import FINAL_VERIFICATION_MESSAGE, MAX_PAYLOAD_BYTES, VERIFICATION_INTERVAL_SECONDS, polling_seconds
-from ..formatter import compact_topic, format_epoch_until, frame_notice
+from ..brief import brief_parts, compact_time, unique, NoticeTooLong
 from ..delivery import permanently_unsendable, queue_refusal, record_part, remaining_parts, submit_notice
 from ..rfs.councils import COUNCILS
 from ..rfs.feed import council_key
@@ -19,42 +19,31 @@ logger = logging.getLogger("wx_echo.traffic")
 def format_item(item, council: str, budget: int, action: str = "NEW",
                 tz_name: str = "Australia/Sydney", council_method: str = "") -> list[str]:
     topic = item.category or item.title or "Traffic notice"
-    if item.road:
-        topic += f" {item.road}"
-    topic, shortened = compact_topic(topic, "Live Traffic NSW", action, budget,
-                                     "check livetraffic.com")
-    details = [item.road] if shortened and item.road else []
-    if item.title and item.title.casefold() not in {item.category.casefold(), topic.casefold()}:
-        details.append(item.title)
-    place = item.suburb if item.road else ", ".join(x for x in (item.road, item.suburb) if x)
-    if place:
-        details.append(place)
-    if item.road_details:
-        details.append(item.road_details)
-    if item.direction:
-        details.append(item.direction)
+    locations = "; ".join(unique([item.road, item.suburb, item.road_details]))
+    core = unique([item.direction, item.impact])
+    if item.title and item.title.casefold() != topic.casefold() and item.title.casefold() not in item.impact.casefold():
+        core.insert(0, item.title)
     scheduled = item.feed == "roadwork" or "ROADWORK" in item.category or bool(item.periods)
-    if item.impact:
-        details.append(("Scheduled impact: " if scheduled else "") + item.impact)
     if scheduled:
-        details.append("Schedule: " + "; ".join(p.describe() for p in item.periods) if item.periods else "Closure schedule not supplied")
+        core.insert(0, "Scheduled; closure unconfirmed")
         state, explanation = item.closure_window()
-        details.append(explanation if state == "unknown" else "Scheduled notice; actual closure not confirmed")
-    if item.public_transport:
-        details.append("Public transport: " + item.public_transport)
-    if item.additional_info:
-        details.append(item.additional_info)
-    if item.advice and item.advice.casefold() not in item.impact.casefold() \
-            and item.advice.casefold() not in item.title.casefold():
-        details.append(item.advice)
-    if council:
-        details.append(f"{council} council" + (f" ({council_method})" if council_method else ""))
-    end_time = format_epoch_until(item.end, tz_name) if not item.hide_end else ""
+        if state == "unknown":
+            core.append("Window unknown")
+        if item.periods:
+            core.append("Schedule: " + "; ".join(
+                ((p.from_day + ("-" + p.to_day if p.to_day else "")) or "days unknown")
+                + " " + (p.start_time or "start unknown") + ("-" + p.finish_time if p.finish_time else "")
+                + " " + (p.timezone or "TZ unknown") for p in item.periods))
+        else:
+            core.append("Closure schedule not supplied")
+    end_time = compact_time(datetime.fromtimestamp(item.end, timezone.utc).isoformat(), tz_name) if item.end and not item.hide_end else ""
     if end_time:
-        details.append(end_time)
-    return frame_notice("Live Traffic NSW", action, topic,
-                        ["; ".join(details) or topic], "check livetraffic.com",
-                        budget, item.item_id)
+        core.append("until " + end_time)
+    optional = [item.advice, f"{council} council" if council else "",
+                item.public_transport, item.additional_info]
+    return brief_parts("Live Traffic NSW", action, topic, [("; ".join(core), locations)],
+                       optional, "check livetraffic.com", budget, item.item_id)
+
 
 
 class TrafficPoller:
@@ -226,9 +215,15 @@ class TrafficPoller:
                     continue
             action = ("UPDATE" if self.db.latest_successful_broadcast("traffic", item.item_id)
                       else "NEW")
-            parts = format_item(item, council, budget, action=action,
-                                tz_name=settings.get("display_timezone", "Australia/Sydney"),
-                                council_method=matches[index].method)
+            try:
+                parts = format_item(item, council, budget, action=action,
+                                    tz_name=settings.get("display_timezone", "Australia/Sydney"),
+                                    council_method=matches[index].method)
+            except NoticeTooLong as exc:
+                if not latest or latest["revision_hash"] != item.revision or latest["disposition"] != "formatting-blocked":
+                    self._history(item, council, status="blocked", disposition="formatting-blocked", detail=str(exc))
+                    self.db.add_error("traffic", str(exc))
+                continue
             message = " || ".join(parts)
             if permanently_unsendable(latest_send, item.revision, message):
                 continue

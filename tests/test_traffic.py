@@ -100,7 +100,7 @@ async def test_first_live_poll_is_baseline_then_new_council_sends_current_item()
     assert db.latest_service_history("traffic", "incident:2")["disposition"] == "excluded-council"
     db.set_setting("traffic_councils", ["Central Coast", "Cessnock"])
     await poller.poll_once()
-    assert tx.sent and "CRASH Pacific Highway" in tx.sent[0][0]
+    assert tx.sent and "CRASH" in tx.sent[0][0] and "Pacific Highway" in tx.sent[0][0]
     for _, callback in tx.sent:
         callback(True, "")
     assert db.traffic_get_item("incident:2")["last_sent_hash"] == client.items[1].revision

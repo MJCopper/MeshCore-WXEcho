@@ -38,7 +38,9 @@ History shows each part's outcome and the time the local radio confirmed transmi
 
 ## Broadcast content
 
-BOM, NSW RFS and Live Traffic NSW notices use the same on-air framing: source, NEW/UPDATE/CANCELLED action, hazard or alert level, and a complete `check …` source note. Multipart notices start with their part number (`1/2`, `2/2`). Only the first part includes the source, action, short reference and hazard or alert level; subsequent parts carry the remaining content. Changes of hazard type or cancellation within a notice retain an explicit section label. The source note stays whole; if it needs a separate part, that part is numbered too. BOM area lists and available warning summaries are split across messages rather than shortened to “surrounding areas”. Traffic notices include both impact and distinct advice when supplied. BOM dates and reliable Traffic end times include the local date; RFS update strings are not broadcast as times because their timezone is not established by the feed.
+BOM, NSW RFS and Live Traffic NSW radio notices target at most two parts. Notice type, cause, warning level, critical status, essential timing and distinct affected locations take priority over detailed descriptions. A third part is permitted only when required locations push the notice beyond two; optional descriptions never trigger it. Notices that cannot meet this policy are recorded as formatting-blocked in History and troubleshooting previews, without omitting locations or marking delivery complete. Full provider details remain available in the application.
+
+Multipart numbering appears first, and only the first part carries the source, action, reference and notice type. Cancellations lead their affected scope; mixed warnings distinguish active locations. The complete source note appears once. Dates and times use the configured local timezone.
 
 ## Features
 
@@ -113,7 +115,7 @@ The default broadcast policy includes all BOM warning products. Settings can ins
 
 Source pages show total counts and pagination, match methods, exclusions, feed freshness and enrichment/fallback status. Traffic feeds fail independently; only successful feeds advance disappearance counters and their first-live baseline. Roadwork notice activity is separate from its schedule: missing timezone or ambiguous timing is shown as unknown, without claiming a road is currently closed.
 
-Multipart notices stream through a queue bounded by 20 pending notices and 1 MiB of stored text. Longer notices are not truncated or rejected merely for exceeding 20 parts. Capacity defers delivery, and restart recovery retries unconfirmed parts. RFS size/agency and Traffic schedules, transport information, advice and diversions are preserved. See [implementation and validation](docs/filtering-implementation.md) and the [original review](docs/filtering-review.md).
+Notices stream through a queue bounded by 20 pending notices and 1 MiB of stored text. Queue capacity defers delivery, and restart recovery retries unconfirmed parts. The brief message policy limits automated notices to two parts, with a third allowed for locations. RFS size/agency and Traffic transport information, advice and diversions are included only when space permits; full details remain stored. See [implementation and validation](docs/filtering-implementation.md) and the [original review](docs/filtering-review.md).
 
 ## Troubleshooting and recovery
 

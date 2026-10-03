@@ -58,7 +58,7 @@ async def test_fixed_link_revisions_reach_history_and_dashboard(tmp_path, monkey
 
     monkeypatch.setattr("app.poller.BOMClient", _BOMClient)
     monkeypatch.setattr(poller._enricher, "enrich", _enrich)
-    monkeypatch.setattr("app.poller.build_mesh_parts", lambda alert, tz, **kwargs: ["marine warning"])
+    monkeypatch.setattr("app.poller.brief_bom_parts", lambda alert, tz, action, budget: ["marine warning"])
 
     await poller.poll_once()
     await poller.poll_once()

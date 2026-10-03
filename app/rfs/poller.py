@@ -7,7 +7,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from ..config import FINAL_VERIFICATION_MESSAGE, MAX_PAYLOAD_BYTES, VERIFICATION_INTERVAL_SECONDS, polling_seconds
-from ..formatter import compact_topic, frame_notice
+from ..brief import brief_parts, NoticeTooLong
+from ..formatter import compact_topic
 from ..delivery import permanently_unsendable, queue_refusal, record_part, remaining_parts, submit_notice
 from .feed import LEVELS, RFSClient, RFSFeedError, council_key
 from .councils import COUNCILS
@@ -16,7 +17,7 @@ logger = logging.getLogger("wx_echo.rfs")
 
 
 def format_incident(incident, budget: int, action: str = "NEW") -> list[str]:
-    # Keep the alert level on every part; put the location in the body once.
+    # Preserve the warning level, cause, status and fullest location once.
     topic, _ = compact_topic(incident.level or "Incident", "NSW RFS", action,
                              budget, "check rfs.nsw.gov.au")
     name, location = incident.name.strip(), incident.location.strip()
@@ -27,19 +28,14 @@ def format_incident(incident, budget: int, action: str = "NEW") -> list[str]:
         details = [name]
     else:
         details = [value for value in (name, location) if value]
-    if incident.kind and incident.kind.casefold() not in incident.name.casefold():
-        details.append(incident.kind)
-    if incident.council:
-        details.append(f"{incident.council} council")
-    if incident.status:
-        details.append(incident.status)
-    if incident.size:
-        details.append("Reported size: " + incident.size)
-    if incident.agency:
-        details.append("Agency: " + incident.agency)
-    return frame_notice("NSW RFS", action, topic,
-                        ["; ".join(details) or "current incident"], "check rfs.nsw.gov.au",
-                        budget, incident.incident_id)
+    kind = incident.kind if incident.kind.casefold() not in incident.name.casefold() else ""
+    core = "; ".join(value for value in (kind, incident.status) if value)
+    optional = [f"{incident.council} council" if incident.council else "",
+                "Reported size: " + incident.size if incident.size else "",
+                "Agency: " + incident.agency if incident.agency else ""]
+    return brief_parts("NSW RFS", action, topic, [(core, "; ".join(details))],
+                       optional, "check rfs.nsw.gov.au", budget, incident.incident_id)
+
 
 
 class RFSPoller:
@@ -156,7 +152,13 @@ class RFSPoller:
             if latest and latest["revision_hash"] == incident.revision and latest["transmit_status"] == "dry-run" and dry_run and not force:
                 continue
             action = "UPDATE" if previous and previous["last_sent_hash"] else "NEW"
-            parts = format_incident(incident, budget, action=action)
+            try:
+                parts = format_incident(incident, budget, action=action)
+            except NoticeTooLong as exc:
+                if not latest or latest["revision_hash"] != incident.revision or latest["disposition"] != "formatting-blocked":
+                    self.db.rfs_add_history(incident, "", "blocked", str(exc), "formatting-blocked")
+                    self.db.add_error("rfs", str(exc))
+                continue
             text = " || ".join(parts)
             if permanently_unsendable(latest, incident.revision, text):
                 continue

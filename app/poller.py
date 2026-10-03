@@ -23,7 +23,7 @@ from .config import (
 from .dedupe import Decision, decide
 from .delivery import permanently_unsendable, queue_refusal, record_part, remaining_parts, submit_notice
 from .filters import FilterRules, should_include
-from .formatter import build_mesh_parts, frame_notice, marine_notice_sections, bom_notice_sections
+from .brief import brief_bom_parts, NoticeTooLong
 from .models import Alert
 from .rfs.feed import council_key
 from .traffic.feed import TrafficClient, prepare_councils
@@ -287,23 +287,22 @@ class BomPoller:
                        + (f" ({', '.join(match.councils)})" if match.councils else "")
                        + (f" via {match.method}" if match.method else ""))
         budget = getattr(self._tx, "message_budget", MAX_PAYLOAD_BYTES)
-        topic = alert.event
-        if decision.disposition == "cancelled":
-            topic = re.sub(r"^Cancellation of\s+", "", topic, flags=re.I)
-            body_parts = [_format_cancel(alert, tz_name)]
-            action = "CANCELLED"
-        else:
-            action = "UPDATE" if decision.disposition == "update" or (latest is not None and (latest["revision_hash"].partition(":")[0] != alert.revision_hash() or latest["disposition"] == "update")) else "NEW"
-            if alert.warning_sections or re.search(r"\bCANCELLED\b", alert.warning_summary or alert.detail or "", re.I):
-                body_parts = bom_notice_sections(alert, tz_name, action)
-            else:
-                body_parts = build_mesh_parts(alert, tz_name, max_bytes=budget, split=False)
-                if body_parts:
-                    first = re.sub(r"^\d+/\d+\s+", "", body_parts[0])
-                    if first.startswith(topic):
-                        body_parts[0] = first[len(topic):].lstrip()
-        parts = frame_notice("BOM", action, topic, body_parts,
-                             "check bom.gov.au", budget, alert.alert_id)
+        action = "CANCELLED" if decision.disposition == "cancelled" else (
+            "UPDATE" if decision.disposition == "update" or (latest is not None and (
+                latest["revision_hash"].partition(":")[0] != alert.revision_hash()
+                or latest["disposition"] == "update")) else "NEW")
+        try:
+            parts = brief_bom_parts(alert, tz_name, action, budget)
+        except NoticeTooLong as exc:
+            parts = []
+            if decision.transmit:
+                item["selection_reason"] = str(exc)
+                if not latest or latest["disposition"] != "formatting-blocked" or latest["revision_hash"] != alert.revision_hash():
+                    self._db.add_history(alert.alert_id, alert.event, alert.area_desc,
+                                         "formatting-blocked", "", str(exc), transmit_status="blocked",
+                                         revision_hash=alert.revision_hash())
+                    self._db.add_error("bom", str(exc))
+                return False
         logged_text = " || ".join(parts)
 
         coverage = json.dumps([all_councils, sorted(selected), include_unknown,

@@ -111,7 +111,8 @@ def test_notice_and_byte_limits_defer_atomically_without_permanent_failure():
 
 
 @pytest.mark.asyncio
-async def test_long_notice_restart_resumes_only_unconfirmed_parts(tmp_path):
+async def test_long_notice_restart_resumes_only_unconfirmed_parts(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.traffic.poller.format_item", lambda *a, **k: [f"Delivery test part {i}" for i in range(25)])
     path = str(tmp_path / "restart.db")
     db = Database(path)
     db.set_setting("traffic_enabled", True)
@@ -183,10 +184,11 @@ def test_scheduled_notice_preserves_schedule_and_does_not_claim_current_closure(
                  public_transport="Buses diverted", additional_info="Keep emergency access clear")
     parts = format_item(event, "Tamworth Regional", 126)
     text = " || ".join(parts)
-    for fact in ("Scheduled impact", "Weekdays", "7:00am", "5:00pm", "timezone not supplied",
-                 "Current closure window unconfirmed", "Buses diverted", "emergency access"):
+    for fact in ("Scheduled", "Weekdays", "7:00am", "5:00pm", "TZ unknown",
+                 "closure unconfirmed"):
         assert fact in text
     assert all(len(part.encode()) <= 126 for part in parts)
+    assert len(parts) <= 2
     assert event.active()
     assert event.closure_window()[0] == "unknown"
 

@@ -185,7 +185,7 @@ class Troubleshooting:
                         if r['transmit_status'] == 'dry-run' and r['id'] > start:
                             details.append(dict(source=s,id=r['external_id'],title=r['title'],
                                                 parts=len(r['transmitted_text'].split(' || ')),text=r['transmitted_text']))
-                        elif r['disposition'].startswith(('excluded','filtered')):
+                        elif r['disposition'].startswith(('excluded','filtered','formatting-blocked')):
                             exclusions.append(dict(source=s,reason=r['detail'],count=1))
                     # Already-queued notices remain excluded even from forced preview.
                     queued = sum(r['transmit_status']=='queued' for r in records)

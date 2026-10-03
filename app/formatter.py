@@ -214,11 +214,14 @@ def compact_topic(topic: str, source: str, action: str, max_bytes: int,
 
 
 def frame_notice(source: str, action: str, topic: str, sections: list,
-                 source_note: str, max_bytes: int, notice_id: str) -> list[str]:
+                 source_note: str, max_bytes: int, notice_id: str, protected_phrases=()) -> list[str]:
     """Number parts first; identify the ordered notice only in its first part.
 
     Preserve labels when marine sections change action or hazard type.
     """
+    protected = sorted(set(protected_phrases), key=len, reverse=True)
+    atoms = [re.escape(p) + r"[,:;.]*" for p in protected if p]
+    token_pattern = "|".join(atoms + [r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+[,:;.]*", r"\S+"])
     clean = []
     for section in sections:
         section_action, section_topic, content = (section if isinstance(section, tuple)
@@ -254,7 +257,18 @@ def frame_notice(source: str, action: str, topic: str, sections: list,
                 joiner = _notice_joiner(remaining) if header else ""
                 prefix = marker + header + joiner
                 room = max_bytes - _byte_len(prefix)
-                chunk = _split_plain(remaining, room)[0]
+                if protected:
+                    tokens = re.findall(token_pattern, remaining)
+                    chunk = ""
+                    for token in tokens:
+                        candidate = (chunk + " " + token).strip()
+                        if _byte_len(candidate) > room:
+                            break
+                        chunk = candidate
+                    if not chunk and not header:
+                        raise ValueError("A required location cannot fit in a MeshCore part")
+                else:
+                    chunk = _split_plain(remaining, room)[0]
                 output.append(prefix + chunk)
                 prefixes.append(prefix)
                 remaining = remaining[len(chunk):].lstrip()
@@ -263,7 +277,7 @@ def frame_notice(source: str, action: str, topic: str, sections: list,
                 previous = output[-2][len(prefixes[-2]):]
                 tail = output[-1][len(prefixes[-1]):]
                 if _byte_len(tail) < 35:
-                    words = re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+[,:;.]*|\S+", previous)
+                    words = re.findall(token_pattern, previous)
                     while len(words) > 1 and _byte_len(tail) < 50:
                         candidate = words[-1] + " " + tail
                         shorter = " ".join(words[:-1])

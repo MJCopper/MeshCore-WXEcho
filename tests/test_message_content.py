@@ -78,7 +78,7 @@ def test_rfs_long_name_is_preserved_when_repeated_context_is_shortened():
     assert text.count("NSW RFS") == 1
     assert text.count("Emergency Warning") == 1
     assert "Eastern Ridge" in text and "Upper Valley" in text
-    assert "Tamworth Regional council" in text
+    assert len(parts) <= 2
     assert all(part.startswith(f"{index}/{len(parts)} ") for index, part in enumerate(parts, 1))
     assert parts[-1].endswith("check rfs.nsw.gov.au")
     assert all(len(part.encode()) <= 126 for part in parts)
@@ -94,11 +94,11 @@ def test_traffic_includes_advice_road_update_and_reliable_end_date():
     assert len(parts) > 1
     assert "Live Traffic NSW UPDATE" in parts[0]
     assert text.count("Live Traffic NSW") == 1
-    assert text.count("CRASH Oxley Highway") == 1
+    assert text.count("CRASH") == 1 and text.count("Oxley Highway") == 1
     assert "One lane closed" in text
     assert "Avoid the area" in text and "long delays expected" in text
-    assert "until Saturday 3 Oct 2026 1:00 PM" in text
-    assert "Tamworth Regional council" in text
+    assert "until 3 Oct 13:00" in text
+    assert len(parts) <= 2
     assert parts[-1].endswith("check livetraffic.com")
     assert all(part.startswith(f"{index}/{len(parts)} ") for index, part in enumerate(parts, 1))
     assert len(set(re.findall(r"#[0-9A-F]{4}", text))) == 1
