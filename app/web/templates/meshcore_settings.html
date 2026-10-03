@@ -13,6 +13,7 @@
     {% if created_channel.secret_hex %}
       <p>Copy this private channel key now. It is shown only on this response and is needed on other devices joining the channel.</p>
       <div class="rec-msg">{{ created_channel.secret_hex }}</div>
+    {% elif created_channel.name.startswith("#") %}<p class="hint">The key is derived from the name. Use the same name on other devices.</p>
     {% else %}<p class="hint">The supplied channel key was saved on the companion.</p>{% endif %}
   </div>
 {% endif %}
@@ -29,6 +30,7 @@
       <div class="row" style="align-items:end;">
         <div><input id="device-name" name="name" value="{{ device.name }}" maxlength="32" required></div>
         <div><button type="submit">Save name</button></div>
+          <label class="chk"><input type="checkbox" name="allow_key_change" value="true">Allow a # name to change this channel’s key. Other devices must use the new name.</label>
       </div>
     </form>
   </section>
@@ -57,12 +59,14 @@
   </section>
   <section class="panel">
     <h3>Channels</h3>
+    <p class="hint">Companion capacity: {{ device.max_channels }} slots. Names beginning with # derive their key from the name. Other renames preserve the existing key.</p>
     {% for channel in device.channels %}
       <form method="post" action="/meshcore/settings/channel/{{ channel.index }}">
         <label for="channel-{{ channel.index }}">{{ channel.index }} &middot; {{ channel.name }}</label>
         <div class="row" style="align-items:end;">
           <div><input id="channel-{{ channel.index }}" name="name" value="{{ channel.name }}" maxlength="32" required></div>
           <div><button type="submit">Save name</button></div>
+          <label class="chk"><input type="checkbox" name="allow_key_change" value="true">Allow a # name to change this channel’s key. Other devices must use the new name.</label>
         </div>
       </form>
       {% if channel.index > 0 %}
@@ -75,8 +79,8 @@
     {% else %}<p class="hint">No configured channels reported.</p>{% endfor %}
     {% if device.available_slots %}
       <form method="post" action="/meshcore/settings/channels/add" autocomplete="off">
-        <h4>Add private channel</h4>
-        <p class="hint">Uses the first empty private slot. Leave the key blank to generate a new one, or enter the 32-character hexadecimal key of an existing channel. If that slot is already selected as Live or Test in Settings, the new channel will take that role.</p>
+        <h4>Add channel</h4>
+        <p class="hint">Uses the first empty non-default slot. For # names, leave the key blank; it is derived from the name. Leave the key blank to generate a new one, or enter the 32-character hexadecimal key of an existing channel. If that slot is already selected as Live or Test in Settings, the new channel will take that role.</p>
         <label for="new-channel-name">Channel name</label>
         <input id="new-channel-name" name="name" maxlength="32" required>
         <label for="new-channel-key">Existing channel key (optional)</label>

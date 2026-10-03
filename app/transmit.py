@@ -11,6 +11,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import logging
+from hashlib import sha256
 import math
 import secrets
 import time
@@ -158,16 +159,48 @@ class MeshCoreTransmitter(Transmitter):
     def connected(self) -> bool:
         return self._mc is not None and self._mc.is_connected
 
+    async def _channel_capacity(self):
+        from meshcore import EventType
+        if not self.connected:
+            raise RuntimeError("MeshCore radio is offline")
+        result = await self._channel_command("Reading channel capacity", self._mc.commands.send_device_query())
+        self._channel_result(result, EventType.DEVICE_INFO, "Reading channel capacity")
+        capacity = int((result.payload or {}).get("max_channels") or 8)
+        if not 1 <= capacity <= 256:
+            raise RuntimeError("Invalid companion channel capacity")
+        return capacity
+
+    @staticmethod
+    async def _channel_command(stage, operation):
+        try:
+            return await operation
+        except (TimeoutError, OSError) as exc:
+            raise RuntimeError(f"{stage} failed: companion communication interrupted; refresh to check whether the change was saved") from exc
+
+    @staticmethod
+    def _channel_result(result, expected, stage, index=None):
+        payload = getattr(result, "payload", None) or {}
+        if getattr(result, "type", None) != expected:
+            details = []
+            for field in ("code", "error_code", "reason"):
+                value = payload.get(field)
+                if isinstance(value, int) or value in ("timeout", "no_event_received", "unsupported"):
+                    details.append(f"{field}={value}")
+            suffix = f" ({', '.join(details)})" if details else ""
+            logging.getLogger(__name__).warning("%s failed%s", stage, suffix)
+            raise RuntimeError(f"{stage} failed{suffix}")
+        if index is not None and payload.get("channel_idx", index) != index:
+            raise RuntimeError(f"{stage} returned a different channel slot")
+        return payload
+
     async def read_channels(self) -> list:
         if self._mc is None:
             raise RuntimeError("not connected")
         from meshcore import EventType
         out = []
-        for idx in range(0, 8):
-            res = await self._mc.commands.get_channel(idx)
-            if getattr(res, "type", None) != EventType.CHANNEL_INFO:
-                break  # device ran out of channel slots
-            p = getattr(res, "payload", {}) or {}
+        for idx in range(await self._channel_capacity()):
+            res = await self._channel_command(f"Reading channel {idx}", self._mc.commands.get_channel(idx))
+            p = self._channel_result(res, EventType.CHANNEL_INFO, f"Reading channel {idx}", idx)
             name = (p.get("channel_name") or "").strip()
             if not name:
                 continue  # empty/unconfigured slot
@@ -211,11 +244,10 @@ class MeshCoreTransmitter(Transmitter):
             pass
         channels = []
         available_slots = []
-        max_channels = min(8, max(1, int(device.get("max_channels") or 8)))
+        max_channels = min(256, max(1, int(device.get("max_channels") or 8)))
         for index in range(max_channels):
-            result = await self._mc.commands.get_channel(index)
-            if result.type != EventType.CHANNEL_INFO:
-                break
+            result = await self._channel_command(f"Reading channel {index}", self._mc.commands.get_channel(index))
+            self._channel_result(result, EventType.CHANNEL_INFO, f"Reading channel {index}", index)
             payload = result.payload or {}
             name = (payload.get("channel_name") or "").strip()
             if name:
@@ -315,8 +347,8 @@ class MeshCoreTransmitter(Transmitter):
         from meshcore import EventType
 
         name = name.strip()
-        if not name or name.startswith("#") or len(name.encode("utf-8")) > 32 or any(ord(char) < 32 for char in name):
-            raise ValueError("channel name must be 1-32 UTF-8 bytes and cannot start with #")
+        if not name or len(name.encode("utf-8")) > 32 or any(ord(char) < 32 for char in name):
+            raise ValueError("channel name must be 1-32 UTF-8 bytes without control characters")
         if secret_hex.strip():
             supplied = secret_hex.strip()
             if len(supplied) != 32:
@@ -333,27 +365,26 @@ class MeshCoreTransmitter(Transmitter):
             generated = True
         if not self.connected:
             raise RuntimeError("MeshCore radio is offline")
-        device = await self._mc.commands.send_device_query()
-        if device.type != EventType.DEVICE_INFO:
-            raise RuntimeError("could not read channel capacity")
-        max_channels = min(8, max(1, int((device.payload or {}).get("max_channels") or 8)))
+        max_channels = await self._channel_capacity()
+        if name.startswith("#"):
+            derived = sha256(name.encode("utf-8")).digest()[:16]
+            if secret_hex.strip() and secret != derived:
+                raise ValueError("# channel keys derive from the name; leave the key blank")
+            secret, generated = derived, False
         slot = None
         for index in range(1, max_channels):
-            current = await self._mc.commands.get_channel(index)
-            if current.type != EventType.CHANNEL_INFO:
-                continue
-            payload = current.payload or {}
+            current = await self._channel_command(f"Reading channel {index}", self._mc.commands.get_channel(index))
+            payload = self._channel_result(current, EventType.CHANNEL_INFO, f"Reading channel {index}", index)
             if not (payload.get("channel_name") or "").strip() and payload.get("channel_secret") == bytes(16):
                 slot = index
                 break
         if slot is None:
             raise RuntimeError("no empty private channel slot is available")
-        result = await self._mc.commands.set_channel(slot, name, secret)
-        if result.type != EventType.OK:
-            raise RuntimeError("radio rejected the new channel")
-        verified = await self._mc.commands.get_channel(slot)
-        saved = verified.payload or {}
-        if (verified.type != EventType.CHANNEL_INFO or saved.get("channel_name") != name
+        result = await self._channel_command("Writing channel", self._mc.commands.set_channel(slot, name, secret))
+        self._channel_result(result, EventType.OK, f"Writing new channel {slot}")
+        verified = await self._channel_command(f"Reading channel {slot}", self._mc.commands.get_channel(slot))
+        saved = self._channel_result(verified, EventType.CHANNEL_INFO, f"Verifying new channel {slot}", slot)
+        if (saved.get("channel_name") != name
                 or saved.get("channel_secret") != secret):
             raise RuntimeError("could not verify the new channel")
         return {"index": slot, "name": name, "secret_hex": secret.hex() if generated else ""}
@@ -361,45 +392,47 @@ class MeshCoreTransmitter(Transmitter):
     async def remove_channel(self, index: int) -> None:
         from meshcore import EventType
 
-        if not 1 <= index < 8:
-            raise ValueError("only private channel slots 1-7 can be removed")
+        if not 1 <= index < 256:
+            raise ValueError("only non-default channel slots 1-255 can be removed")
         if not self.connected:
             raise RuntimeError("MeshCore radio is offline")
-        current = await self._mc.commands.get_channel(index)
-        if current.type != EventType.CHANNEL_INFO or not (current.payload or {}).get("channel_name"):
+        current = await self._channel_command(f"Reading channel {index}", self._mc.commands.get_channel(index))
+        self._channel_result(current, EventType.CHANNEL_INFO, f"Reading channel {index}", index)
+        if not (current.payload or {}).get("channel_name"):
             raise RuntimeError("channel is unavailable")
-        result = await self._mc.commands.set_channel(index, "", bytes(16))
-        if result.type != EventType.OK:
-            raise RuntimeError("radio rejected channel removal")
-        verified = await self._mc.commands.get_channel(index)
-        saved = verified.payload or {}
+        result = await self._channel_command("Writing channel", self._mc.commands.set_channel(index, "", bytes(16)))
+        self._channel_result(result, EventType.OK, f"Removing channel {index}")
+        verified = await self._channel_command(f"Reading channel {index}", self._mc.commands.get_channel(index))
+        saved = self._channel_result(verified, EventType.CHANNEL_INFO, f"Verifying channel {index}", index)
         if (verified.type != EventType.CHANNEL_INFO or saved.get("channel_name")
                 or saved.get("channel_secret") != bytes(16)):
             raise RuntimeError("could not verify channel removal")
 
-    async def rename_channel(self, index: int, name: str) -> dict:
+    async def rename_channel(self, index: int, name: str, allow_key_change: bool = False) -> dict:
         from meshcore import EventType
 
         name = name.strip()
-        if not 0 <= index < 8:
-            raise ValueError("channel index must be 0-7")
-        if not name or name.startswith("#") or len(name.encode("utf-8")) > 32 or any(ord(char) < 32 for char in name):
-            raise ValueError("channel name must be 1-32 UTF-8 bytes and cannot start with #")
+        if not 0 <= index < 256:
+            raise ValueError("channel index must be 0-255")
+        if not name or len(name.encode("utf-8")) > 32 or any(ord(char) < 32 for char in name):
+            raise ValueError("channel name must be 1-32 UTF-8 bytes without control characters")
         if not self.connected:
             raise RuntimeError("MeshCore radio is offline")
 
-        current = await self._mc.commands.get_channel(index)
-        if current.type != EventType.CHANNEL_INFO:
-            raise RuntimeError("channel is unavailable")
-        payload = current.payload or {}
+        current = await self._channel_command(f"Reading channel {index}", self._mc.commands.get_channel(index))
+        payload = self._channel_result(current, EventType.CHANNEL_INFO, f"Reading channel {index}", index)
         secret = payload.get("channel_secret")
         if not payload.get("channel_name") or not isinstance(secret, bytes) or len(secret) != 16:
             raise RuntimeError("channel cannot be renamed safely")
-        result = await self._mc.commands.set_channel(index, name, secret)
-        if result.type != EventType.OK:
-            raise RuntimeError("radio rejected the channel name")
-        verified = await self._mc.commands.get_channel(index)
-        updated = verified.payload or {}
+        if name.startswith("#"):
+            derived = sha256(name.encode("utf-8")).digest()[:16]
+            if derived != secret and not allow_key_change:
+                raise ValueError("Renaming to a # channel changes its key. Confirm the key change before saving.")
+            secret = derived
+        result = await self._channel_command("Writing channel", self._mc.commands.set_channel(index, name, secret))
+        self._channel_result(result, EventType.OK, f"Writing channel {index}")
+        verified = await self._channel_command(f"Reading channel {index}", self._mc.commands.get_channel(index))
+        updated = self._channel_result(verified, EventType.CHANNEL_INFO, f"Verifying channel {index}", index)
         if (verified.type != EventType.CHANNEL_INFO or updated.get("channel_name") != name
                 or updated.get("channel_secret") != secret):
             raise RuntimeError("could not verify channel name and key preservation")
@@ -631,10 +664,14 @@ class TransmitManager:
         self._db.set_setting("meshcore_channels_target",
                              {"conn": transport.conn, "target": transport.target})
 
-    async def rename_device_channel(self, index: int, name: str) -> dict:
+    async def rename_device_channel(self, index: int, name: str, allow_key_change: bool = False) -> dict:
         async with self._lock:
-            renamed = await self._saved_radio().rename_channel(index, name)
-            await self._refresh_saved_channels()
+            radio = self._saved_radio()
+            renamed = await radio.rename_channel(index, name, True) if allow_key_change else await radio.rename_channel(index, name)
+            try:
+                await self._refresh_saved_channels()
+            except Exception:
+                renamed["refresh_error"] = "Channel saved and verified, but channel lists could not be refreshed. Refresh before selecting a channel."
             return renamed
 
     async def add_device_channel(self, name: str, secret_hex: str = "") -> dict:
@@ -649,8 +686,8 @@ class TransmitManager:
 
     async def remove_device_channel(self, index: int) -> None:
         async with self._lock:
-            if not 1 <= index < 8:
-                raise ValueError("only private channel slots 1-7 can be removed")
+            if not 1 <= index < 256:
+                raise ValueError("only non-default channel slots 1-255 can be removed")
             if index in (self._transports["meshcore"].channel,
                          self._transports["meshcore"].test_channel):
                 raise ValueError("change the Live and Test channel selections before removing this channel")

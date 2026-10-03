@@ -755,13 +755,17 @@ async def save_meshcore_name(request: Request, name: str = Form(...)):
 
 
 @router.post("/meshcore/settings/channel/{index}", response_class=HTMLResponse)
-async def save_meshcore_channel(request: Request, index: int, name: str = Form(...)):
+async def save_meshcore_channel(request: Request, index: int, name: str = Form(...),
+                                allow_key_change: bool = Form(False)):
     try:
-        await _tx(request).rename_device_channel(index, name)
+        tx = _tx(request)
+        renamed = await tx.rename_device_channel(index, name, True) if allow_key_change else await tx.rename_device_channel(index, name)
     except ValueError as exc:
         return await _device_edit_error(request, str(exc), 400)
     except RuntimeError as exc:
         return await _device_edit_error(request, str(exc), 503)
+    if renamed and renamed.get("refresh_error"):
+        return await _device_edit_error(request, renamed["refresh_error"], 200)
     return RedirectResponse("/meshcore/settings?saved=channel", status_code=303)
 
 

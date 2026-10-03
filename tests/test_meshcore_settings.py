@@ -99,7 +99,7 @@ async def test_channel_rename_preserves_secret_and_rejects_hash_names():
         "index": 0, "name": "Weather", "hash": "ab",
     }
     assert commands.calls == [(0, "Weather", secret)]
-    with pytest.raises(ValueError, match="cannot start with #"):
+    with pytest.raises(ValueError, match="Confirm the key change"):
         await transmitter.rename_channel(0, "#Public")
     assert len(commands.calls) == 1
 
@@ -528,7 +528,7 @@ async def test_remove_channel_clears_secret_and_protects_public_slot():
     commands = Commands()
     transmitter = MeshCoreTransmitter("serial")
     transmitter._mc = SimpleNamespace(is_connected=True, commands=commands)
-    with pytest.raises(ValueError, match="slots 1-7"):
+    with pytest.raises(ValueError, match="slots 1-255"):
         await transmitter.remove_channel(0)
     await transmitter.remove_channel(2)
     assert commands.calls == [(2, "", bytes(16))]
@@ -723,3 +723,99 @@ async def test_generated_key_survives_cache_refresh_failure():
     created = await tx.add_device_channel("Weather")
     assert created["secret_hex"] == "ab" * 16
     assert created["refresh_error"] == "temporary read failure"
+
+
+@pytest.mark.asyncio
+async def test_hash_channel_add_and_rename_require_expected_derived_key():
+    from hashlib import sha256
+    class Commands:
+        slots = {0: ("Public", b"p" * 16), 1: ("", bytes(16))}
+        async def send_device_query(self):
+            return SimpleNamespace(type=EventType.DEVICE_INFO, payload={"max_channels": 2})
+        async def get_channel(self, index):
+            name, secret = self.slots[index]
+            return SimpleNamespace(type=EventType.CHANNEL_INFO, payload={
+                "channel_idx": index, "channel_name": name, "channel_secret": secret})
+        async def set_channel(self, index, name, secret):
+            self.slots[index] = name, secret
+            return SimpleNamespace(type=EventType.OK, payload={})
+    radio = MeshCoreTransmitter("serial")
+    commands = Commands()
+    radio._mc = SimpleNamespace(is_connected=True, commands=commands)
+    result = await radio.add_channel("#weather")
+    assert result["secret_hex"] == ""
+    assert commands.slots[1][1] == sha256(b"#weather").digest()[:16]
+    with pytest.raises(ValueError, match="Confirm"):
+        await radio.rename_channel(1, "#alerts")
+    assert commands.slots[1][0] == "#weather"
+    await radio.rename_channel(1, "#alerts", True)
+    assert commands.slots[1] == ("#alerts", sha256(b"#alerts").digest()[:16])
+    await radio.rename_channel(1, "Weather")
+    assert commands.slots[1][1] == sha256(b"#alerts").digest()[:16]
+
+
+@pytest.mark.asyncio
+async def test_channels_above_seven_are_discovered_and_created():
+    class Commands:
+        names = {}
+        secrets = {}
+        async def send_device_query(self):
+            return SimpleNamespace(type=EventType.DEVICE_INFO, payload={"max_channels": 40})
+        async def get_channel(self, index):
+            return SimpleNamespace(type=EventType.CHANNEL_INFO, payload={
+                "channel_idx": index, "channel_name": self.names.get(index, "Taken" if index < 9 else ""),
+                "channel_secret": self.secrets.get(index, b"t" * 16 if index < 9 else bytes(16))})
+        async def set_channel(self, index, name, secret):
+            self.names[index], self.secrets[index] = name, secret
+            return SimpleNamespace(type=EventType.OK)
+    radio = MeshCoreTransmitter("serial")
+    radio._mc = SimpleNamespace(is_connected=True, commands=Commands())
+    created = await radio.add_channel("Weather")
+    assert created["index"] == 9
+    channels = await radio.read_channels()
+    assert {"index": 9, "name": "Weather"} in channels
+    await radio.rename_channel(9, "Alerts")
+    await radio.remove_channel(9)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["wrong-slot", "timeout", "rejected"])
+async def test_channel_failures_identify_stage_without_keys(failure):
+    class Commands:
+        async def get_channel(self, index):
+            if failure == "timeout":
+                raise TimeoutError()
+            return SimpleNamespace(type=EventType.CHANNEL_INFO, payload={
+                "channel_idx": index + (failure == "wrong-slot"), "channel_name": "Ops",
+                "channel_secret": b"x" * 16})
+        async def set_channel(self, index, name, secret):
+            return SimpleNamespace(type=EventType.ERROR, payload={
+                "code": 7, "channel_secret": "never-display-this"})
+    radio = MeshCoreTransmitter("serial")
+    radio._mc = SimpleNamespace(is_connected=True, commands=Commands())
+    with pytest.raises(RuntimeError) as error:
+        await radio.rename_channel(1, "Alerts")
+    assert "never-display-this" not in str(error.value)
+    assert ("different channel slot" if failure == "wrong-slot" else
+            "communication interrupted" if failure == "timeout" else "code=7") in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_verified_rename_survives_dropdown_refresh_failure():
+    class Database:
+        def get_setting(self, key, default=None):
+            return default
+    class Radio:
+        connected = True
+        async def rename_channel(self, index, name):
+            return {"index": index, "name": name}
+        async def read_channels(self):
+            raise RuntimeError("offline")
+    tx = TransmitManager(Database())
+    transport = tx._transports["meshcore"]
+    transport.target = "/dev/ttyUSB0"
+    transport.connected = True
+    transport.tx = Radio()
+    result = await tx.rename_device_channel(2, "Weather")
+    assert result["name"] == "Weather"
+    assert "saved and verified" in result["refresh_error"]
